@@ -1,0 +1,5 @@
+// Copy to Local.xcconfig, which git ignores. Needed to run on a device; the simulator builds
+// without it.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+// A bundle ID belongs to one team, so a device build needs one of your own.
+EMBER_BUNDLE_ID = com.yourname.ember

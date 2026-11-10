@@ -1,0 +1,4 @@
+// Settings every checkout shares. Signing is each developer's own: copy
+// Local.example.xcconfig to Local.xcconfig and put your team there.
+EMBER_BUNDLE_ID = com.example.ember
+#include? "Local.xcconfig"

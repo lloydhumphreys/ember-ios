@@ -1,0 +1,11 @@
+.DS_Store
+Ember.xcodeproj/
+*.xcworkspace/
+DerivedData/
+.build/
+xcuserdata/
+build/
+# Local development only: the seed password for a local Ember.
+.dev/
+# Each developer's own signing team.
+Config/Local.xcconfig

@@ -1,0 +1,96 @@
+name: Ember
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+packages:
+  EmberSDK:
+    path: ../ember-swift-sdk
+
+targets:
+  Ember:
+    type: application
+    platform: iOS
+    sources:
+      - path: Ember
+        excludes:
+          - Resources/Info.plist
+    dependencies:
+      - package: EmberSDK
+        product: EmberSDK
+      - package: EmberSDK
+        product: EmberRichText
+    info:
+      path: Ember/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: Ember
+        # XcodeGen's defaults for these two are the literals 1.0 and 1; pointing them at the
+        # build settings makes bumping the version one edit.
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        # Ember is self-hosted, and a server on the local network (often plain http) is a normal
+        # place to run one.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            localhost:
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    # Signing is each developer's own: the team and, for a device, the bundle ID come from
+    # Config/Local.xcconfig, which git ignores (see Config/Local.example.xcconfig).
+    configFiles:
+      Debug: Config/Shared.xcconfig
+      Release: Config/Shared.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(EMBER_BUNDLE_ID)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Ember's orange, from the flame's sunset, darkened until white labels on it read.
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        # iPhone only until there's an iPad layout.
+        TARGETED_DEVICE_FAMILY: "1"
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+
+  EmberTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [EmberTests]
+    dependencies:
+      - target: Ember
+      - package: EmberSDK
+        product: EmberTesting
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+
+schemes:
+  Ember:
+    build:
+      targets:
+        Ember: all
+        EmberTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets: [EmberTests]
