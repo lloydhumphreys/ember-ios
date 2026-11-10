@@ -28,13 +28,13 @@ struct CardsView: View {
     }
 }
 
-/// A card: an attachment's pretext over a frame, with a bar down an attachment's leading side in its
-/// colour, holding its parts and an attachment's thumbnail at the trailing side, or over the parts at
-/// accessibility text sizes, where a column beside it would be too narrow to read.
+/// A card: an attachment's pretext over an inset, square-cornered and tinted like a quote, with a
+/// bar down an attachment's leading side in its colour, holding its parts and an attachment's
+/// thumbnail at the trailing side, or over the parts at accessibility text sizes, where a column
+/// beside it would be too narrow to read.
 private struct CardView: View {
     let card: Card
 
-    @Environment(\.pixelLength) private var pixelLength
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var isNarrow = true
 
@@ -51,7 +51,6 @@ private struct CardView: View {
     }
 
     private var frame: some View {
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         let bar = CardBar.of(card)
         return Group {
             if dynamicTypeSize.isAccessibilitySize {
@@ -75,9 +74,7 @@ private struct CardView: View {
                 Self.color(bar).frame(width: 4).accessibilityHidden(true)
             }
         }
-        .background(Color(.systemBackground))
-        .clipShape(shape)
-        .overlay(shape.strokeBorder(Color(.separator), lineWidth: max(pixelLength, 0.5)))
+        .background(Self.tint(bar))
         .onGeometryChange(for: Bool.self) { CardWidth.isNarrow($0.size.width) } action: { isNarrow = $0 }
         .environment(\.cardIsNarrow, isNarrow)
         .accessibilityElement(children: .contain)
@@ -106,6 +103,13 @@ private struct CardView: View {
         case .red: .red
         case let .rgb(red, green, blue): Color(red: red, green: green, blue: blue)
         }
+    }
+
+    /// The bar's colour, faint, behind the card; a neutral fill for a card whose bar has no colour
+    /// or that has no bar.
+    private static func tint(_ bar: CardBar?) -> Color {
+        guard let bar, bar != .separator else { return Color(.quaternarySystemFill) }
+        return color(bar).opacity(0.12)
     }
 }
 
