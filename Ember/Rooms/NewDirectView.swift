@@ -11,22 +11,22 @@ struct NewDirectView: View {
     @Environment(Workspace.self) private var workspace
     @Environment(\.dismiss) private var dismiss
     @State private var typed = ""
+    @State private var isSearching = false
     /// In the order they were picked, which is the order the server is sent.
     @State private var picked: [UserID] = []
-    @State private var isStarting = false
-    @State private var error: String?
+    @State private var submission = Submission.idle
 
     var body: some View {
         NavigationStack {
             content
                 .navigationTitle("New Message")
                 .navigationBarTitleDisplayMode(.inline)
-                .searchable(text: $typed, placement: .navigationBarDrawer(displayMode: .always))
+                .searchable(text: $typed, isPresented: $isSearching, placement: .navigationBarDrawer(displayMode: .always))
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
                 .toolbar { toolbar }
         }
-        .interactiveDismissDisabled(isStarting)
+        .interactiveDismissDisabled(submission.isWorking)
     }
 
     @ViewBuilder
@@ -38,7 +38,7 @@ struct NewDirectView: View {
                 Button("Try Again") {
                     Task { await workspace.reloadDirectory() }
                 }
-                .buttonStyle(.glassProminent)
+                .prominentButtonStyle()
             }
         } else if workspace.people.isEmpty, workspace.directoryStatus == .loading {
             ProgressView()
@@ -46,7 +46,7 @@ struct NewDirectView: View {
         } else {
             let options = matches.filter { !picked.contains($0.id) }
             List {
-                if let error {
+                if let error = submission.failure {
                     Section {
                         Text(error)
                             .foregroundStyle(.red)
@@ -65,7 +65,7 @@ struct NewDirectView: View {
                     ForEach(options) { personRow($0, isPicked: false) }
                 }
             }
-            .disabled(isStarting)
+            .disabled(submission.isWorking)
             .overlay {
                 if options.isEmpty, picked.isEmpty, !sought.isEmpty {
                     ContentUnavailableView.search(text: sought)
@@ -77,26 +77,31 @@ struct NewDirectView: View {
 
     private var sought: String { RoomList.soughtName(typed) }
 
+    /// The directory is sorted once each time it changes; what's typed only narrows that list.
     private var matches: [DirectoryUser] {
-        RoomList.peopleMatching(Array(workspace.people.values), me: workspace.me.id, name: sought)
+        let everyone = PickerLists.shared.direct(workspace.people, me: workspace.me.id)
+        return sought.isEmpty ? everyone : RoomList.peopleMatching(everyone, me: workspace.me.id, name: sought)
     }
 
     @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 36
 
     private func personRow(_ person: DirectoryUser, isPicked: Bool) -> some View {
         Button {
-            error = nil
+            submission.clearFailure()
             if isPicked {
                 picked.removeAll { $0 == person.id }
             } else {
                 picked.append(person.id)
+                // Ending the search brings back the toolbar, and Start with it; clearing what was
+                // typed brings back everyone else to pick from.
+                isSearching = false
+                typed = ""
             }
         } label: {
             HStack(spacing: 12) {
                 AvatarView(userID: person.id, name: person.name, size: avatarSize)
                 HStack(spacing: 4) {
                     Text(person.name)
-                        .lineLimit(1)
                     if workspace.isAssistant(person.id) {
                         AssistantMark()
                     }
@@ -117,16 +122,16 @@ struct NewDirectView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
-            Button(role: .cancel) {
+            CancelButton {
                 dismiss()
             }
-            .disabled(isStarting)
+            .disabled(submission.isWorking)
         }
         ToolbarItem(placement: .confirmationAction) {
-            if isStarting {
+            if submission.isWorking {
                 ProgressView()
             } else {
-                Button("Start", role: .confirm) {
+                ConfirmButton("Start") {
                     start()
                 }
                 .disabled(picked.isEmpty)
@@ -135,16 +140,13 @@ struct NewDirectView: View {
     }
 
     private func start() {
-        guard !picked.isEmpty, !isStarting else { return }
-        isStarting = true
-        error = nil
+        guard !picked.isEmpty, submission.begin() else { return }
         Task {
             do {
                 let room = try await workspace.startDirect(with: picked)
                 onStarted(room.id)
             } catch {
-                self.error = error.localizedDescription
-                isStarting = false
+                submission.fail(error.localizedDescription)
             }
         }
     }

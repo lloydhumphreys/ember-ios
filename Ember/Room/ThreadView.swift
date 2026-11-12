@@ -22,7 +22,7 @@ struct ThreadView: View {
             // and timeline rather than opening another; and the thread the room already holds,
             // when another screen has it open.
             guard thread == nil, let parentID = link.threadID else { return }
-            thread = workspace.session(for: link.roomID).thread(parentID, at: link.messageID)
+            thread = workspace.thread(parentID, in: link.roomID, at: link.messageID)
         }
     }
 }
@@ -31,7 +31,7 @@ private struct ThreadScreen: View {
     let thread: ThreadSession
 
     @Environment(Workspace.self) private var workspace
-    @State private var draft = ""
+    @Environment(NetworkStatus.self) private var network
     @State private var editing: MessageEdit?
     @State private var boosting: Message?
     @State private var selecting: SelectableText?
@@ -49,6 +49,13 @@ private struct ThreadScreen: View {
             .navigationTitle("Thread")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(.hidden, for: .tabBar)
+            .toolbar {
+                if let connection = RoomConnection(isOnline: network.isOnline, isLoaded: thread.timeline.isLoaded, status: room.status) {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        RoomConnectionView(connection: connection)
+                    }
+                }
+            }
             .onAppear {
                 if lease == nil || lease?.isClosed == true { lease = thread.open() }
             }
@@ -66,8 +73,10 @@ private struct ThreadScreen: View {
     }
 
     @ViewBuilder private var content: some View {
-        if thread.timeline.parent == .gone || room.status == .stopped(.notFound) {
-            ContentUnavailableView("This message no longer exists.", systemImage: "bubble.left.and.bubble.right")
+        if let unavailable = thread.timeline.parent == .gone ? .notFound : RoomUnavailable(room.status) {
+            RoomUnavailableView(reason: unavailable, place: .thread) {
+                lease = RoomUnavailable.retry(thread, keeping: lease)
+            }
         } else {
             ThreadTimelineView(
                 thread: thread,
@@ -76,15 +85,17 @@ private struct ThreadScreen: View {
                     edit: { message in
                         let edit = MessageEdit(message) { workspace.name(of: $0) }
                         editing = edit
-                        draft = edit.text
                     },
                     customBoost: { boosting = $0 },
-                    selectText: { selecting = SelectableText(text: $0) }
+                    selectText: { selecting = SelectableText(text: $0) },
+                    message: { id in
+                        id == thread.parentID ? thread.timeline.parentMessage : thread.timeline.replies.first { $0.id == id }
+                    }
                 )
             )
-            .safeAreaBar(edge: .bottom, spacing: 0) {
+            .bottomBar(spacing: 0) {
                 if thread.timeline.canReply {
-                    RoomComposer(room: room, thread: thread, draft: $draft, editing: $editing, focusesOnAppear: true) {
+                    RoomComposer(room: room, thread: thread, editing: $editing) {
                         sentCount += 1
                     }
                 }
@@ -111,13 +122,14 @@ private struct ThreadTimelineView: View {
     /// Paging waits for the first layout (and the scroll to a linked reply) to land.
     @State private var hasSettled = false
     @State private var highlightedID: String?
-    @State private var isScrollingByHand = false
-    @State private var isPinnedToEnd = true
-    @State private var holdTask: Task<Void, Never>?
     /// The reply a link is landing on, and where its row is, as the room's jump has them.
     @State private var landingID: String?
     @State private var landingFrame: CGRect?
-    @State private var viewportHeight: CGFloat = 0
+    @State private var olderGate = PagingGate()
+    @State private var tracker = TimelineTracker()
+    @State private var layout = TimelineLayoutCache(in: .thread)
+    /// The last fold this timeline has stopped holding its offset for, as in the room.
+    @State private var settledFold = MessageFolds.shared.lastToggle?.serial
 
     private static let bottomID = "thread-bottom"
 
@@ -131,6 +143,7 @@ private struct ThreadTimelineView: View {
                         MessageRow(
                             message: parent, grouped: false, me: timeline.me, isHighlighted: false,
                             session: thread.room, actions: actions, place: .threadParent)
+                        .id(parent.id)
                         if let count = TimelineLayout.replyCount(summary: parent.thread?.count, loaded: timeline.replies.count) {
                             RepliesDivider(count: count)
                         }
@@ -147,50 +160,68 @@ private struct ThreadTimelineView: View {
                         .frame(height: 8)
                         .id(Self.bottomID)
                 }
+                .scrollTargetLayout()
                 .padding(.top, 8)
             }
             // Opens at the end and keeps it in view as the content grows, but content shorter
             // than the screen sits at the top, under the navigation bar, rather than at the foot
             // with blank space over it.
             .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .defaultScrollAnchor(.bottom, for: .sizeChanges)
+            .defaultScrollAnchor(TimelineScroll.sizeChangeAnchor(isHoldingFold: holdsFold), for: .sizeChanges)
             .defaultScrollAnchor(.top, for: .alignment)
             .scrollDismissesKeyboard(.interactively)
             .overlay {
                 if !timeline.isLoaded { ProgressView() }
             }
-            .onScrollGeometryChange(for: Bool.self) { RoomTimeline.isNearStart($0) } action: { _, near in
-                isNearTop = near
+            .onScrollGeometryChange(for: TimelineGeometry.self) { TimelineGeometry($0) } action: { old, new in
+                scrolled(from: old, to: new, proxy)
             }
-            // Held at the end as the content or the composer changes height, as the room's is; a
-            // change that moves the offset only decides whether the reader is still there.
-            .onScrollGeometryChange(for: RoomTimeline.TimelineEnd.self) { geometry in
-                RoomTimeline.TimelineEnd(
-                    contentHeight: geometry.contentSize.height, inset: geometry.contentInsets.bottom,
-                    container: geometry.containerSize.height, offset: geometry.contentOffset.y,
-                    isNear: RoomTimeline.isNearEnd(geometry))
-            } action: { old, new in
-                if abs(new.offset - old.offset) >= 0.5 {
-                    isPinnedToEnd = new.isNear
-                    return
+            .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.01) { ids in
+                tracker.visibleIDs = ids
+                tracker.topID = TimelineScroll.topmost(ids, position: layout.position(of:))
+                noteReader(proxy)
+            }
+            .onScrollTargetVisibilityChange(idType: String.self, threshold: 0.99) { ids in
+                tracker.wholeIDs = ids
+                noteReader(proxy)
+            }
+            .onScrollPhaseChange { old, phase in
+                tracker.isScrollingByHand = phase == .tracking || phase == .interacting || phase == .decelerating
+                if phase == .tracking, old != .tracking { tracker.handTookOver() }
+                if PagingGate.fingerCameDown(from: old, to: phase), !olderGate.isOpen {
+                    olderGate.saw(isNear: isNearTop, scrollingByHand: true)
                 }
-                guard isPinnedToEnd, !isScrollingByHand,
-                      new.contentHeight != old.contentHeight || new.inset != old.inset || new.container != old.container
-                else { return }
-                holdAtEnd(proxy)
-            }
-            .onScrollGeometryChange(for: CGFloat.self) { $0.containerSize.height } action: { _, height in
-                viewportHeight = height
-            }
-            .onScrollPhaseChange { _, phase in
-                isScrollingByHand = phase == .tracking || phase == .interacting || phase == .decelerating
             }
             // A task rather than `onChange`, as in the room: asking sets the loading flag at once,
             // which would turn the wish off again within the same update.
             .task(id: wantsOlder) {
-                if wantsOlder { thread.loadOlder() }
+                guard wantsOlder else { return }
+                olderGate.asked()
+                thread.loadOlder()
+            }
+            // Older replies landing above the reader are kept from carrying them down the screen,
+            // as in the room.
+            // A reply folded or unfolded keeps its place, as in the room.
+            .onChange(of: MessageFolds.shared.lastToggle) { _, toggle in
+                guard let toggle, isFoldHere(toggle) else { return }
+                tracker.hold(toggle)
+            }
+            .onChange(of: MessageFolds.shared.raising) { _, raise in
+                guard let raise, raise.place != .room else { return }
+                guard position(of: raise.messageID) != nil else { return MessageFolds.shared.dropped(raise) }
+                tracker.raise(raise.messageID, proxy) { MessageFolds.shared.raised(raise) }
+            }
+            .task(id: MessageFolds.shared.lastToggle?.serial) {
+                guard let serial = MessageFolds.shared.lastToggle?.serial, serial != settledFold else { return }
+                do { try await Task.sleep(for: TimelineScroll.foldHold) } catch { return }
+                settledFold = serial
+            }
+            .onChange(of: timeline.replies.first?.id) {
+                guard !tracker.isPinnedToEnd, timeline.focus == nil, let top = tracker.topID else { return }
+                tracker.keepOnNextLayout(top)
             }
             .onChange(of: sentCount) {
+                tracker.isPinnedToEnd = true
                 scrollToBottom(proxy)
             }
             .task(id: FocusKey(focus: timeline.focus, isLoaded: timeline.isLoaded)) {
@@ -201,17 +232,118 @@ private struct ThreadTimelineView: View {
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
                 withAnimation(.easeOut(duration: 0.6)) { highlightedID = nil }
             }
-            .onDisappear { holdTask?.cancel() }
+            .onAppear { tracker.watchForBlank { lookForBlank(proxy) } }
+            .onDisappear {
+                tracker.leave()
+                settledFold = MessageFolds.shared.lastToggle?.serial
+            }
         }
     }
 
     private var items: [TimelineItem] {
-        TimelineLayout.items(messages: timeline.replies, pending: timeline.pending, me: timeline.me?.id, in: .thread)
+        layout.items(messages: timeline.replies, pending: timeline.pending, me: timeline.me?.id)
+    }
+
+    /// One geometry change, read once, as the room reads it (see `TimelineScroll.decide`).
+    private func scrolled(from old: TimelineGeometry, to new: TimelineGeometry, _ proxy: ScrollViewProxy) {
+        tracker.geometry = new
+        tracker.viewportHeight = new.containerHeight
+        let resized = new.viewportChanged(from: old)
+        if let keep = tracker.keepID {
+            switch TimelineScroll.keeping(from: old, to: new, isTouched: tracker.isScrollingByHand) {
+            case .toEnd:
+                tracker.cancelMoves()
+                tracker.isPinnedToEnd = true
+                holdAtEnd(proxy)
+            case .keepRow: tracker.keep(keep, proxy)
+            case .none: break
+            }
+        } else {
+            let decision = TimelineScroll.decide(
+                from: old, to: new, isPinnedToEnd: tracker.isPinnedToEnd, canHoldEnd: !tracker.isScrollingByHand,
+                isHoldingFold: isHoldingFold, isTouched: tracker.isScrollingByHand, isGoingToEnd: tracker.isGoingToEnd)
+            tracker.isPinnedToEnd = decision.isPinnedToEnd
+            switch decision.move {
+            case .toEnd: holdAtEnd(proxy)
+            case .keepRow:
+                if resized {
+                    tracker.keepRowThroughResize(proxy)
+                } else if let top = tracker.topID {
+                    tracker.keep(top, proxy)
+                }
+            case .none: break
+            }
+        }
+        tracker.noteTop(resized: resized)
+        if isNearTop != new.isNearStart { isNearTop = new.isNearStart }
+        var gate = olderGate
+        gate.saw(isNear: new.isNearStart, scrollingByHand: false)
+        if gate != olderGate { olderGate = gate }
+    }
+
+    /// Whether `toggle` was the parent or a reply folded or unfolded in this thread.
+    private func isFoldHere(_ toggle: MessageFolds.Toggle) -> Bool {
+        TimelineScroll.isFold(toggle, inThread: true)
+            && (toggle.messageID == timeline.parentMessage?.id || timeline.replies.contains { $0.id == toggle.messageID })
+    }
+
+    /// Whether the offset is held for a fold the reader has just made here.
+    private var isHoldingFold: Bool {
+        let toggle = MessageFolds.shared.lastToggle
+        return TimelineScroll.holdsFold(toggle, isHere: toggle.map(isFoldHere) ?? false, settled: settledFold)
+    }
+
+    /// Whether the fold the reader has just made here is held, starting to hold it the first time.
+    private var holdsFold: Bool {
+        guard isHoldingFold, let toggle = MessageFolds.shared.lastToggle else { return false }
+        tracker.hold(toggle)
+        return true
+    }
+
+    /// Where the row `id` falls, the parent first, then the replies' rows.
+    private func position(of id: String) -> Int? {
+        id == timeline.parentMessage?.id ? -1 : layout.position(of: id)
+    }
+
+    /// As the room notes it.
+    private func noteReader(_ proxy: ScrollViewProxy) {
+        tracker.readerID = TimelineScroll.readerRow(tracker.visibleIDs, whole: tracker.wholeIDs, position: position(of:))
+        if let reader = tracker.readerID, position(of: reader) != nil {
+            tracker.lastRowID = reader
+        } else {
+            tracker.watchForBlank { lookForBlank(proxy) }
+        }
+    }
+
+    /// As the room brings itself back from showing none of its rows.
+    private func lookForBlank(_ proxy: ScrollViewProxy) -> Bool {
+        guard timeline.isLoaded else { return true }
+        let hasRows = timeline.parentMessage != nil || !timeline.replies.isEmpty || !timeline.pending.isEmpty
+        let rowsInView = tracker.visibleIDs.contains { position(of: $0) != nil }
+            && tracker.geometry?.showsContent != false
+        let isMoving = tracker.isScrollingByHand || tracker.isRaising || timeline.focus != nil || landingID != nil
+        let keeping = (tracker.keepID ?? (tracker.isPinnedToEnd ? nil : tracker.lastRowID)).flatMap { id in
+            position(of: id) == nil ? nil : id
+        }
+        switch TimelineScroll.recover(hasRows: hasRows, rowsInView: rowsInView, isMoving: isMoving, keeping: keeping) {
+        case .toEnd:
+            // As the room does it (see `RoomTimeline.returnToEnd`).
+            tracker.isPinnedToEnd = true
+            if let last = items.last?.id { proxy.scrollTo(last, anchor: .bottom) }
+            tracker.move { holdAtEnd(proxy) }
+            return true
+        case .row(let id):
+            tracker.lastRowID = nil
+            tracker.keep(id, proxy)
+            return true
+        case nil:
+            return true
+        }
     }
 
     /// Not while a link's reply is still being paged back to: the thread does that itself.
     private var wantsOlder: Bool {
-        hasSettled && timeline.focus == nil && isNearTop && timeline.isLoaded && timeline.hasMore && !timeline.isLoadingOlder
+        hasSettled && olderGate.isOpen && timeline.focus == nil && isNearTop && timeline.isLoaded && timeline.hasMore && !timeline.isLoadingOlder
     }
 
     /// Lands on the reply a link went to once the thread has it, as the room lands a jump, lights
@@ -231,12 +363,13 @@ private struct ThreadTimelineView: View {
             landingFrame = nil
             landingID = focus
             defer { landingID = nil }
-            await JumpLander.on(focus, proxy, frame: { landingFrame }, viewport: { viewportHeight }).show(
+            tracker.cancelMoves()
+            await JumpLander.on(focus, proxy, frame: { landingFrame }, viewport: { tracker.viewportHeight }).show(
                 highlight: { highlightedID = focus },
                 shown: {
                     // Left where the landing put it, rather than taken back to the end as the
                     // content grows.
-                    isPinnedToEnd = false
+                    tracker.isPinnedToEnd = false
                     thread.focusShown()
                 })
             return
@@ -265,15 +398,28 @@ private struct ThreadTimelineView: View {
     /// As the room's: now, and again a frame later once a shrinking composer's inset has gone.
     private func holdAtEnd(_ proxy: ScrollViewProxy) {
         proxy.scrollTo(Self.bottomID, anchor: .bottom)
-        holdTask?.cancel()
-        holdTask = Task {
-            do { try await Task.sleep(for: .milliseconds(16)) } catch { return }
-            guard isPinnedToEnd, !isScrollingByHand else { return }
+        let tracker = tracker
+        tracker.move {
+            guard tracker.isPinnedToEnd, !tracker.isScrollingByHand else { return }
+            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+        }
+        goingToEnd(proxy)
+    }
+
+    /// As the room's: anything that grows on the way to the end is followed, and the end landed
+    /// once that's over.
+    private func goingToEnd(_ proxy: ScrollViewProxy) {
+        let tracker = tracker
+        tracker.goingToEnd {
+            guard tracker.isPinnedToEnd, !tracker.isScrollingByHand, let geometry = tracker.geometry,
+                geometry.distanceToEnd > 1 || TimelineScroll.bringBack(geometry, isTouched: false) == .toEnd
+            else { return }
             proxy.scrollTo(Self.bottomID, anchor: .bottom)
         }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
+        goingToEnd(proxy)
         if reduceMotion {
             proxy.scrollTo(Self.bottomID, anchor: .bottom)
         } else {

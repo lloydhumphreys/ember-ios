@@ -38,7 +38,6 @@ private struct RoomScreen: View {
     @Environment(Workspace.self) private var workspace
     @Environment(\.scenePhase) private var scenePhase
 
-    @State private var draft = ""
     @State private var editing: MessageEdit?
     /// The message a custom boost is being typed for.
     @State private var boosting: Message?
@@ -68,7 +67,7 @@ private struct RoomScreen: View {
             .navigationBarBackButtonHidden()
             .keepsSwipeBack()
             .toolbar {
-                RoomToolbar(roomID: link.roomID, room: room, status: session.status, isLoaded: session.timeline.isLoaded)
+                RoomToolbar(roomID: link.roomID, room: room, status: session.status, isLoaded: session.timeline.isLoaded, present: session.timeline.present)
             }
             .onAppear {
                 isShown = true
@@ -102,8 +101,10 @@ private struct RoomScreen: View {
     }
 
     @ViewBuilder private var content: some View {
-        if session.status == .stopped(.notFound) {
-            ContentUnavailableView("Room not found", systemImage: "number")
+        if let unavailable = RoomUnavailable(session.status) {
+            RoomUnavailableView(reason: unavailable, place: .room) {
+                lease = RoomUnavailable.retry(session, keeping: lease)
+            }
         } else {
             RoomTimeline(
                 session: session,
@@ -112,17 +113,75 @@ private struct RoomScreen: View {
                     edit: { message in
                         let edit = MessageEdit(message) { workspace.name(of: $0) }
                         editing = edit
-                        draft = edit.text
                     },
                     customBoost: { boosting = $0 },
                     selectText: { selecting = SelectableText(text: $0) },
-                    openThread: { threadLink = $0 }
+                    openThread: { threadLink = $0 },
+                    message: { session.timeline.message($0) }
                 )
             )
-            .safeAreaBar(edge: .bottom, spacing: 0) {
-                RoomComposer(room: session, draft: $draft, editing: $editing) {
+            .bottomBar(spacing: 0) {
+                RoomComposer(room: session, editing: $editing) {
                     sentCount += 1
                 }
+            }
+        }
+    }
+}
+
+/// Why a room or a thread shows no timeline: its socket stopped for good, where trying again on
+/// its own wouldn't help.
+enum RoomUnavailable: Equatable {
+    /// The room is gone, or you're no longer in it.
+    case notFound
+    /// The server refused the connection.
+    case refused
+
+    init?(_ status: ReconnectingSocket.Status) {
+        switch status {
+        case .stopped(.notFound): self = .notFound
+        case .stopped(.refused): self = .refused
+        default: return nil
+        }
+    }
+
+    /// Retry: connects the room again, keeping the screen's lease, or taking one if it has none,
+    /// whether or not another screen's lease holds the room too.
+    @MainActor static func retry(_ session: RoomSession, keeping lease: RoomLease?) -> RoomLease {
+        let held = lease.flatMap { $0.isClosed ? nil : $0 } ?? session.open()
+        session.reconnect()
+        return held
+    }
+
+    /// Retry for a thread, as for a room.
+    @MainActor static func retry(_ thread: ThreadSession, keeping lease: ThreadLease?) -> ThreadLease {
+        let held = lease.flatMap { $0.isClosed ? nil : $0 } ?? thread.open()
+        thread.reconnect()
+        return held
+    }
+}
+
+/// A room or thread that can't be shown: not found, or refused with Retry.
+struct RoomUnavailableView: View {
+    enum Place { case room, thread }
+
+    let reason: RoomUnavailable
+    let place: Place
+    let retry: () -> Void
+
+    var body: some View {
+        switch reason {
+        case .notFound:
+            switch place {
+            case .room: ContentUnavailableView("Room not found", systemImage: "number")
+            case .thread: ContentUnavailableView("This message no longer exists.", systemImage: "bubble.left.and.bubble.right")
+            }
+        case .refused:
+            ContentUnavailableView {
+                Label(place == .room ? "Couldn’t open room" : "Couldn’t open thread", systemImage: "exclamationmark.triangle")
+            } actions: {
+                Button("Retry", action: retry)
+                    .buttonStyle(.bordered)
             }
         }
     }
@@ -136,6 +195,19 @@ struct MessageActions {
     var selectText: (String) -> Void
     /// Pushes a thread; unused inside one, which has nowhere further to go.
     var openThread: (RoomLink) -> Void = { _ in }
+    /// The message with this id as the screen has it now, if it has it.
+    var message: (String) -> Message? = { _ in nil }
+
+    /// Whether the screen shows this message deleted, so a deletion that failed to answer made it.
+    func showsDeleted(_ messageID: String) -> Bool {
+        message(messageID)?.isDeleted == true
+    }
+
+    /// Whether the screen shows this message without this boost, so a removal that failed to
+    /// answer made it.
+    func showsRemoved(boost boostID: String, from messageID: String) -> Bool {
+        message(messageID).map { message in !message.boosts.contains { $0.id == boostID } } ?? false
+    }
 }
 
 /// Letting go of a screen's lease a moment after it goes, rather than at once. Pushing a thread
@@ -177,8 +249,8 @@ private struct MessageActionPresentations: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .alert("Boost", isPresented: Binding(get: { boosting != nil }, set: { if !$0 { boosting = nil } })) {
-                TextField("Boost", text: $customBoost)
+            .alert("React", isPresented: Binding(get: { boosting != nil }, set: { if !$0 { boosting = nil } })) {
+                TextField("Reaction", text: $customBoost)
                     // A reaction, not a sentence.
                     .textInputAutocapitalization(.never)
                     // The server counts UTF-16 units, so the field is clamped the same way. The
@@ -190,9 +262,9 @@ private struct MessageActionPresentations: ViewModifier {
                         if clamped != text { customBoost = clamped }
                     }
                 Button("Cancel", role: .cancel) { customBoost = ""; boosting = nil }
-                Button("Boost") {
+                Button("React") {
                     if let boosting, Limits.boostFits(customBoost) {
-                        room.boost(boosting.id, content: customBoost)
+                        BoostChoices.boost(boosting, with: customBoost, in: room)
                     }
                     customBoost = ""
                     boosting = nil

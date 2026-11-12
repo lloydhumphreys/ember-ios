@@ -2,44 +2,121 @@ import SwiftUI
 import EmberSDK
 import EmberRichText
 
-/// Picks the screen for the session's phase. Every signed-in screen hangs off the `Workspace`
-/// put in the environment here, so none of them handles a missing one.
+/// The account on screen, and the sheet that adds another over it. Switching accounts makes the
+/// whole of the new one's screens afresh, so nothing of the last one's is left on screen.
 struct RootView: View {
-    @Environment(SessionController.self) private var session
+    @Environment(Accounts.self) private var accounts
     @AppStorage(AppAppearance.storageKey) private var appearance: AppAppearance = .system
 
     var body: some View {
-        content
-            .opensSafeLinks(origin: origin)
-            .preferredColorScheme(appearance.colorScheme)
-            .task { await session.start() }
+        Group {
+            if let slot = accounts.current {
+                AccountScreen(session: slot.session)
+                    .id(slot.id)
+            } else {
+                LaunchView()
+            }
+        }
+        .sheet(item: adding) { slot in
+            AddAccountView(session: slot.session)
+                .environment(accounts)
+                .environment(accounts.network)
+                .preferredColorScheme(appearance.colorScheme)
+        }
+        .environment(accounts.network)
+        .preferredColorScheme(appearance.colorScheme)
+        .task { accounts.start() }
     }
 
-    /// The server a relative link is on, once there is one.
-    private var origin: URL? {
-        switch session.phase {
-        case .signedOut(let client, _): client.origin
-        case .signedIn(let workspace): workspace.client.origin
-        case .launching, .needsServer, .unreachable: nil
-        }
+    /// The account being added; swiping the sheet away cancels it.
+    private var adding: Binding<Accounts.Slot?> {
+        Binding(
+            get: { accounts.adding },
+            set: { if $0 == nil { accounts.cancelAdding() } })
+    }
+}
+
+/// Picks the screen for one account's phase. Every signed-in screen hangs off the `Workspace` put
+/// in the environment here, so none of them handles a missing one.
+private struct AccountScreen: View {
+    let session: SessionController
+    @Environment(Accounts.self) private var accounts
+
+    var body: some View {
+        content
+            .opensSafeLinks(origin: session.phase.linkOrigin)
+            .environment(session)
+            .task { await session.start() }
     }
 
     @ViewBuilder
     private var content: some View {
+        if case .signedIn(let workspace) = session.phase {
+            SignedInView(workspace: workspace)
+                // A new sign-in rebuilds every tab rather than reusing the last one's state.
+                .id(ObjectIdentifier(workspace))
+        } else if accounts.canLeave {
+            // Another account is signed in: this one's sign-in can be left for it.
+            NavigationStack {
+                SignInFlow(session: session)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { Task { await accounts.leave() } }
+                        }
+                    }
+            }
+        } else {
+            SignInFlow(session: session)
+        }
+    }
+}
+
+/// Another account's server and sign-in, over the account on screen, which stays signed in.
+private struct AddAccountView: View {
+    let session: SessionController
+    @Environment(Accounts.self) private var accounts
+
+    var body: some View {
+        NavigationStack {
+            SignInFlow(session: session)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { accounts.cancelAdding() }
+                    }
+                }
+        }
+        .opensSafeLinks(origin: session.phase.linkOrigin)
+        .environment(session)
+        .task { await session.start() }
+    }
+}
+
+/// Choosing a server and signing in to it, for whichever account `session` is.
+private struct SignInFlow: View {
+    let session: SessionController
+
+    var body: some View {
         switch session.phase {
-        case .launching:
+        case .launching, .signedIn:
             LaunchView()
         case .needsServer:
             ServerView()
         case .signedOut(let client, let bootstrap):
-            SignInView(client: client, bootstrap: bootstrap)
+            SignInView(client: client, bootstrap: bootstrap, reason: session.signOutReason)
                 .id(client.origin)
-        case .signedIn(let workspace):
-            SignedInView(workspace: workspace)
-                // A new sign-in rebuilds every tab rather than reusing the last one's state.
-                .id(ObjectIdentifier(workspace))
         case .unreachable(let origin, let message):
             UnreachableView(origin: origin, message: message)
+        }
+    }
+}
+
+extension SessionController.Phase {
+    /// The server a relative link is on, once there is one.
+    @MainActor var linkOrigin: URL? {
+        switch self {
+        case .signedOut(let client, _): client.origin
+        case .signedIn(let workspace): workspace.client.origin
+        case .launching, .needsServer, .unreachable: nil
         }
     }
 }
@@ -88,11 +165,17 @@ extension View {
 private struct SignedInView: View {
     let workspace: Workspace
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(NetworkStatus.self) private var network
 
     var body: some View {
         HomeView()
             .environment(workspace)
+            .task {
+                await SidebarPhase.keepTrying(workspace, clock: ContinuousClock(), network: network)
+            }
             .onAppear { if scenePhase != .background { workspace.start() } }
+            // Switched to another account: this one's socket closes until it's back.
+            .onDisappear { workspace.stop() }
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .active: workspace.start()
@@ -127,7 +210,7 @@ private struct UnreachableView: View {
             Button("Retry") {
                 Task { await session.retry() }
             }
-            .buttonStyle(.glassProminent)
+            .prominentButtonStyle()
             Button("Change Server") {
                 session.forgetServer()
             }

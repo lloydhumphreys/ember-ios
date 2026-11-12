@@ -294,9 +294,12 @@ private struct CardIcon: View {
 private struct CardThumb: View {
     let image: CardImage
 
+    /// 75 points at the default text size, as the web's is, and larger with the text.
+    @ScaledMetric(relativeTo: .body) private var side: CGFloat = 75
+
     var body: some View {
-        CardImageView(url: image.url, points: 75)
-            .frame(width: 75, height: 75)
+        CardImageView(url: image.url, points: side)
+            .frame(width: side, height: side)
             .clipShape(.rect(cornerRadius: 6, style: .continuous))
             .accessibilityHidden(image.alt.isEmpty)
             .accessibilityLabel(image.alt)
@@ -313,7 +316,10 @@ private struct CardImagePart: View {
     @Environment(Workspace.self) private var workspace
     @Environment(\.openURL) private var openURL
     @Environment(\.displayScale) private var displayScale
-    @State private var loaded: CardImages.Loaded?
+    @State private var load = ImageLoad<CardImages.Loaded>.loading
+    /// The address `load` is for: the view is kept when the card's picture changes.
+    @State private var loadURL: String?
+    @State private var reconnects = 0
 
     private static let maxSize = CGSize(width: 360, height: 500)
     private var maxPixel: Int { Int((Self.maxSize.height * displayScale).rounded(.up)) }
@@ -337,32 +343,54 @@ private struct CardImagePart: View {
             .accessibilityAddTraits([.isImage, .isLink])
         }
         .padding(.top, 4)
-        .task(id: CardImages.key(image.url, maxPixel: maxPixel)) {
+        .task(id: "\(CardImages.key(image.url, maxPixel: maxPixel))#\(reconnects)") {
             guard current == nil else { return }
-            loaded = await CardImages.shared.image(image.url, host: workspace.client.origin.host() ?? "", maxPixel: maxPixel)
+            let host = workspace.client.origin.host() ?? ""
+            // Taken before the wait, so a switch to another account mid-load can't move the
+            // picture into its stores.
+            let images = CardImages.shared
+            let sizes = PictureSizes.shared
+            let url = image.url
+            await ImageLoad.keepTrying {
+                await images.result(url, host: host, maxPixel: maxPixel)
+            } update: {
+                load = $0
+                loadURL = url
+            }
+            if loadURL == url, let loaded = load.picture { sizes.remember(loaded.pixelSize, for: PictureSizes.key(card: url)) }
         }
+        .retryingOnReconnect(after: current == nil ? shownLoad.failure : nil, count: $reconnects)
+    }
+
+    /// `load`, while it's for the picture shown now.
+    private var shownLoad: ImageLoad<CardImages.Loaded> {
+        loadURL == image.url ? load : .loading
     }
 
     private var current: CardImages.Loaded? {
-        loaded ?? CardImages.shared.cached(image.url, maxPixel: maxPixel)
+        shownLoad.picture ?? CardImages.shared.cached(image.url, maxPixel: maxPixel)
     }
 
     @ViewBuilder private var picture: some View {
         let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
         if let current {
-            // Never larger than the picture itself, as the web's image isn't.
-            let limit = CGSize(width: min(Self.maxSize.width, current.pixelSize.width), height: min(Self.maxSize.height, current.pixelSize.height))
-            FittedFrame(aspectRatio: current.pixelSize.width / current.pixelSize.height, limit: limit) {
-                Image(uiImage: current.image)
-                    .resizable()
+            FittedFrame(aspectRatio: current.aspectRatio, limit: Self.limit(current.pixelSize)) {
+                PictureImage(image: current.image)
                     .clipShape(shape)
             }
         } else {
-            // Until it's here, and if it never comes: a quiet box the size most pictures are.
-            FittedFrame(aspectRatio: 16 / 9, limit: Self.maxSize) {
+            // Until it's here, and if it never comes: the size it was when last seen, or else a
+            // quiet box the size most pictures are.
+            let known = PictureSizes.shared.size(for: PictureSizes.key(card: image.url))
+            FittedFrame(aspectRatio: known.map { $0.width / $0.height } ?? 16 / 9, limit: known.map(Self.limit) ?? Self.maxSize) {
                 shape.fill(Color(.secondarySystemFill))
             }
         }
+    }
+
+    /// Never larger than the picture itself, as the web's image isn't.
+    static func limit(_ pixelSize: CGSize) -> CGSize {
+        CGSize(width: min(maxSize.width, pixelSize.width), height: min(maxSize.height, pixelSize.height))
     }
 }
 
@@ -524,9 +552,10 @@ private struct CardLinkButton: View {
             .controlSize(.small)
             .accessibilityAddTraits(.isLink)
             switch button.style {
-            case .primary: link.buttonStyle(.borderedProminent)
+            case .primary: link.buttonStyle(.borderedProminent).tint(.accentFill)
             case .danger: link.buttonStyle(.bordered).tint(.red)
-            case nil: link.buttonStyle(.bordered)
+            // In the text's own colour on grey, as the tint over the card's own tint reads faintly.
+            case nil: link.buttonStyle(.bordered).tint(.primary)
             }
         }
     }
@@ -536,31 +565,99 @@ private struct CardLinkButton: View {
 
 /// A table that scrolls sideways when it's wider than the card, every row alike: hairline-ruled
 /// cells, each column as wide as its content up to 240 points, lined up as it says, and cut to one
-/// line unless it wraps.
+/// line unless it wraps. A long one shows its first `CardTableRows.shown` rows until asked for the
+/// rest, as every cell is laid out to line up its columns. Each row reads as one, its cells under
+/// the first row's.
 private struct CardTable: View {
     let rows: [[String]]
     let columns: [CardColumn]
 
+    @Environment(Workspace.self) private var workspace
     @Environment(\.pixelLength) private var pixelLength
+    @State private var showsAll = false
 
     var body: some View {
-        ScrollView(.horizontal) {
-            Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    GridRow {
-                        ForEach(Array(row.enumerated()), id: \.offset) { index, cell in
-                            CardTableCell(html: cell, column: index < columns.count ? columns[index] : CardColumn(), rule: max(pixelLength, 0.5))
+        let shown = showsAll ? rows : Array(rows.prefix(CardTableRows.shown))
+        let host = workspace.client.origin.host() ?? ""
+        let readings = CardTableRows.readings(shown.map { row in
+            row.map { CardTableRows.plain(DocumentCache.shared.cardText(html: $0, host: host).document.blocks) }
+        })
+        VStack(alignment: .leading, spacing: 6) {
+            ScrollView(.horizontal) {
+                Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+                    ForEach(Array(shown.enumerated()), id: \.offset) { rowIndex, row in
+                        GridRow {
+                            ForEach(Array(row.enumerated()), id: \.offset) { index, cell in
+                                CardTableCell(html: cell, column: index < columns.count ? columns[index] : CardColumn(), rule: max(pixelLength, 0.5))
+                                    .accessibilityHidden(index > 0)
+                                    .accessibilityElement(children: .ignore)
+                                    .accessibilityLabel(index == 0 ? readings[rowIndex] : "")
+                                    .accessibilityAddTraits(index == 0 && rowIndex == 0 && rows.count > 1 ? .isHeader : [])
+                            }
                         }
                     }
                 }
+                .padding(1)
             }
-            .padding(1)
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            .scrollIndicators(.hidden)
+            if rows.count > shown.count {
+                Button("Show all \(rows.count) rows") { showsAll = true }
+                    .font(.footnote)
+            }
         }
-        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-        .scrollIndicators(.hidden)
         .padding(.top, 4)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Table")
+    }
+}
+
+/// How a card's table is shown and read.
+enum CardTableRows {
+    /// How many rows a long table shows until asked for the rest.
+    static let shown = 20
+
+    /// What each row reads as: the first as its cells, and each after it as the first row's cell
+    /// over its own, "Host: web-1, Status: up", leaving out empty cells.
+    static func readings(_ rows: [[String]]) -> [String] {
+        guard let headers = rows.first else { return [] }
+        return rows.enumerated().map { index, row in
+            let cells = row.enumerated().compactMap { column, value -> String? in
+                guard !value.isEmpty else { return nil }
+                guard index > 0, column < headers.count, !headers[column].isEmpty else { return value }
+                return "\(headers[column]): \(value)"
+            }
+            return cells.joined(separator: ", ")
+        }
+    }
+
+    /// A cell's text, without its styles.
+    static func plain(_ blocks: [RichBlock]) -> String {
+        blocks.map { block -> String in
+            switch block {
+            case let .paragraph(inlines), let .heading(_, inlines): plain(inlines)
+            case let .codeBlock(_, code): code
+            case let .quote(blocks): plain(blocks)
+            case let .list(_, _, items): items.map(plain).joined(separator: ", ")
+            case let .table(header, rows): ((header.map { [$0] } ?? []) + rows).map { $0.map(plain).joined(separator: " ") }.joined(separator: ", ")
+            case .rule: ""
+            case let .preview(preview): preview.title
+            }
+        }
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func plain(_ inlines: [RichInline]) -> String {
+        inlines.map { inline -> String in
+            switch inline {
+            case let .text(text, _): text
+            case let .link(_, children): plain(children)
+            case .mention: ""
+            case .lineBreak: " "
+            }
+        }
+        .joined()
     }
 }
 

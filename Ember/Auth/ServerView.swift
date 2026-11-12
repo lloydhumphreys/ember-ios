@@ -5,12 +5,11 @@ import EmberSDK
 struct ServerView: View {
     @Environment(SessionController.self) private var session
     @State private var address = ""
-    @State private var isWorking = false
-    @State private var error: String?
+    @State private var submission = Submission.idle
     @FocusState private var isFocused: Bool
 
     private var canContinue: Bool {
-        !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isWorking
+        !address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !submission.isWorking
     }
 
     /// Correcting the address is what clears the complaint about it. It's done as the field
@@ -19,7 +18,7 @@ struct ServerView: View {
     private var correcting: Binding<String> {
         Binding(
             get: { address },
-            set: { address = $0; if error != nil { error = nil } })
+            set: { address = $0; submission.clearFailure() })
     }
 
     var body: some View {
@@ -37,7 +36,7 @@ struct ServerView: View {
                 form
                     .padding(.horizontal, 24)
 
-                if let error {
+                if let error = submission.failure {
                     Text(error)
                         .font(.footnote)
                         .foregroundStyle(.red)
@@ -52,6 +51,7 @@ struct ServerView: View {
         // bounces even when everything fits, so dragging down always takes the keyboard away.
         .scrollDismissesKeyboard(.interactively)
         .background(Color(.systemBackground))
+        .announcesWhenShown(submission.failure)
         .onAppear { isFocused = true }
     }
 
@@ -69,7 +69,7 @@ struct ServerView: View {
 
             Button(action: submit) {
                 Group {
-                    if isWorking {
+                    if submission.isWorking {
                         ProgressView()
                     } else {
                         Text("Continue").font(.body.weight(.semibold))
@@ -78,6 +78,7 @@ struct ServerView: View {
                 .frame(maxWidth: .infinity, minHeight: 28)
             }
             .buttonStyle(.borderedProminent)
+            .tint(.accentFill)
             .disabled(!canContinue)
             .padding(.top, 14)
         }
@@ -90,15 +91,14 @@ struct ServerView: View {
 
     private func submit() {
         guard canContinue else { return }
-        isWorking = true
-        error = nil
+        submission.begin()
         Task {
             do {
                 try await session.useServer(address)
+                submission.finish()
             } catch {
-                self.error = (error as? EmberError)?.message ?? error.localizedDescription
+                submission.fail((error as? EmberError)?.message ?? error.localizedDescription)
             }
-            isWorking = false
         }
     }
 }

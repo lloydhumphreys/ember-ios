@@ -1,3 +1,4 @@
+import Foundation
 import EmberSDK
 
 extension Involvement {
@@ -13,7 +14,15 @@ extension Involvement {
         case .everything: "All Messages"
         case .nothing: "Off"
         case .invisible: "Hidden"
+        case .unknown(let raw): Self.readable(raw)
         }
+    }
+
+    /// A level the app doesn't know, as the server names it but readable: "mentions_and_threads"
+    /// is "Mentions and threads".
+    static func readable(_ raw: String) -> String {
+        let words = raw.replacingOccurrences(of: "_", with: " ").trimmingCharacters(in: .whitespaces)
+        return words.prefix(1).uppercased() + words.dropFirst()
     }
 
     /// The web's bells, as SF Symbols.
@@ -23,6 +32,7 @@ extension Involvement {
         case .everything: "bell"
         case .nothing: "bell.slash"
         case .invisible: "eye.slash"
+        case .unknown: "bell"
         }
     }
 

@@ -5,19 +5,13 @@ import EmberSDK
 /// first, in the Home tab's rows.
 struct ActivityView: View {
     @Environment(Workspace.self) private var workspace
+    @Environment(NetworkStatus.self) private var network
 
     var body: some View {
-        Group {
-            if workspace.isLoaded {
-                list
-            } else {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
+        SidebarGate { list }
         .navigationTitle("Activity")
         .toolbar {
-            if workspace.connection != .open {
+            if ConnectionIndicator.isShown(workspace: workspace, network: network) {
                 ToolbarItem(placement: .topBarLeading) {
                     ConnectionIndicator()
                 }
@@ -35,6 +29,7 @@ struct ActivityView: View {
             }
         }
         .listStyle(.plain)
+        .clearsFloatingNewMessage()
         .overlay {
             if unread.isEmpty {
                 ContentUnavailableView("No Unread Messages", systemImage: "bell")

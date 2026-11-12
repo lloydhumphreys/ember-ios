@@ -317,12 +317,433 @@ import EmberTesting
         #expect(recorder.urls.count == 3)
     }
 
+    // MARK: A message's picture
+
+    @Test func aPictureFitsItsBoxAtItsOwnShape() {
+        // Tall: as high as the box, and only as wide as that makes it.
+        #expect(PictureBounds.size(aspectRatio: 0.5) == CGSize(width: 160, height: 320))
+        // Wide or square: as wide as the box.
+        #expect(PictureBounds.size(aspectRatio: 2) == CGSize(width: 280, height: 140))
+        #expect(PictureBounds.size(aspectRatio: 1) == CGSize(width: 280, height: 280))
+    }
+
+    /// The outline once ran round the whole box, leaving a tall picture in the left of an empty frame.
+    @Test func aTallPictureIsOutlinedAtItsOwnWidth() throws {
+        let tall = UIImage(data: Self.png(width: 100, height: 200))!
+        func picture() -> some View { Image(uiImage: tall).resizable().scaledToFill() }
+
+        // Its shape known ahead, as the server tells it: the frame is the picture's own size.
+        let known = try Self.drawn(picture().pictureFrame(aspectRatio: 0.5))
+        #expect(known.size == CGSize(width: 160, height: 320))
+        #expect(try Self.inkedWidth(of: known) == 160)
+        // Its shape found from the picture: the same.
+        let found = try Self.drawn(picture().pictureFrame(aspectRatio: nil))
+        #expect(found.size == CGSize(width: 160, height: 320))
+        #expect(try Self.inkedWidth(of: found) == 160)
+        // A wide one still takes the box's width.
+        let wide = try Self.drawn(picture().pictureFrame(aspectRatio: 2))
+        #expect(wide.size == CGSize(width: 280, height: 140))
+    }
+
+    /// A wide picture whose shape is found from it leaves no empty box beneath it.
+    @Test func aWidePictureOfNoKnownShapeIsOnlyAsTallAsItIs() throws {
+        let wide = UIImage(data: Self.png(width: 200, height: 100))!
+        let drawn = try Self.drawn(Image(uiImage: wide).resizable().scaledToFill().pictureFrame(aspectRatio: nil))
+        #expect(drawn.size == CGSize(width: 280, height: 140))
+    }
+
+    @Test func aPictureThatIsNotTheShapeItWasSaidToBeStaysInItsBox() throws {
+        // Said to be square, and ten times as tall as it is wide.
+        let strip = UIImage(data: Self.png(width: 20, height: 200))!
+        let drawn = try Self.drawn(Image(uiImage: strip).resizable().scaledToFill().pictureFrame(aspectRatio: 1))
+        #expect(drawn.size == CGSize(width: 280, height: 280))
+    }
+
+    // MARK: Trying a picture again
+
+    @Test func aPictureThatFailedForNowIsTriedAgainUntilItLoads() async {
+        var answers: [Result<Int, ImageLimits.Failure>] = [.failure(.status(503)), .failure(.status(503)), .success(7)]
+        var attempts = 0
+        var failures: [ImageLimits.Failure] = []
+        let value = await ImageRetry.keepTrying(pauses: [.zero, .zero, .zero]) {
+            attempts += 1
+            return answers.removeFirst()
+        } failed: { failures.append($0) }
+        #expect(value == 7)
+        #expect(attempts == 3)
+        #expect(failures == [.status(503), .status(503)])
+    }
+
+    @Test func aPictureThatIsNotThereIsNotTriedAgainByItself() async {
+        var attempts = 0
+        let value: Int? = await ImageRetry.keepTrying(pauses: [.zero, .zero, .zero]) {
+            attempts += 1
+            return .failure(.status(404))
+        } failed: { _ in }
+        #expect(value == nil)
+        #expect(attempts == 1)
+    }
+
+    @Test func aPictureThatCantBeReachedStopsAfterItsTries() async {
+        var attempts = 0
+        let value: Int? = await ImageRetry.keepTrying(pauses: [.zero, .zero]) {
+            attempts += 1
+            return .failure(.unreachable)
+        } failed: { _ in }
+        #expect(value == nil)
+        #expect(attempts == 3)
+        #expect(ImageRetry.pauses.count == 3)
+    }
+
+    @Test func aServerPictureThatWasNotThereIsFetchedAgainOnceForgotten() async {
+        let (images, client, transport) = Self.remote(.init(status: 404))
+        #expect(await images.result(client: client, path: "/files/a.png", maxPixel: 10) == .failure(.status(404)))
+        // Remembered: the same answer, and no second fetch.
+        #expect(await images.result(client: client, path: "/files/a.png", maxPixel: 10) == .failure(.status(404)))
+        #expect(transport.count == 1)
+
+        transport.answer = .init(body: Self.png(width: 4, height: 4))
+        images.forget(client, "/files/a.png")
+        #expect(await images.image(client: client, path: "/files/a.png", maxPixel: 10) != nil)
+        #expect(transport.count == 2)
+    }
+
+    @Test func resettingServerPicturesEmptiesThemAndTheirFailures() async {
+        let (images, client, transport) = Self.remote(.init(body: Self.png(width: 4, height: 4)))
+        #expect(await images.image(client: client, path: "/files/a.png", maxPixel: 10) != nil)
+        transport.answer = .init(status: 404)
+        #expect(await images.image(client: client, path: "/files/b.png", maxPixel: 10) == nil)
+        #expect(images.hasFailed(client, "/files/b.png"))
+
+        images.reset()
+        #expect(images.cached(RemoteImages.key(client, "/files/a.png", maxPixel: 10)) == nil)
+        #expect(!images.hasFailed(client, "/files/b.png"))
+    }
+
+    @Test func aLoadUnderWayAtAResetIsNotKept() async {
+        let gate = AsyncGate()
+        let (images, client, _) = Self.remote(.init(body: Self.png(width: 4, height: 4)), gate: gate)
+        let load = Task { await images.image(client: client, path: "/files/a.png", maxPixel: 10) }
+        await gate.waitForRequest()
+        images.reset()
+        gate.release()
+        #expect(await load.value != nil)
+        #expect(images.cached(RemoteImages.key(client, "/files/a.png", maxPixel: 10)) == nil)
+    }
+
+    @Test func aCardPictureThatWasNotThereIsFetchedAgainOnceForgottenOrReset() async {
+        let images = CardImages(protocolClasses: [ImageStub.self])
+        let address = "https://forgotten.example.org/a.png"
+        guard case .failure(.status(404)) = await images.result(address, host: host, maxPixel: 10) else {
+            Issue.record("Expected a 404")
+            return
+        }
+        #expect(images.hasFailed(address))
+        images.forget(address)
+        #expect(!images.hasFailed(address))
+
+        ImageStub.answer(address, .body(Self.png(width: 4, height: 4)))
+        #expect(await images.image(address, host: host, maxPixel: 10) != nil)
+        #expect(images.cached(address, maxPixel: 10) != nil)
+        #expect(ImageStub.requests(to: "forgotten.example.org").count == 2)
+
+        images.reset()
+        #expect(images.cached(address, maxPixel: 10) == nil)
+    }
+
+    // MARK: A picture's shape
+
+    @Test func aPictureFarTallerOrWiderThanThreeToOneIsCroppedToThat() {
+        let tall = PictureBounds.size(aspectRatio: 60.0 / 900.0)
+        #expect(abs(tall.width - 320.0 / 3) < 0.01 && tall.height == 320)
+        let wide = PictureBounds.size(aspectRatio: 900.0 / 60.0)
+        #expect(wide.width == 280 && abs(wide.height - 280.0 / 3) < 0.01)
+        // Within the bounds, its own shape.
+        #expect(PictureBounds.clamped(0.5) == 0.5)
+        #expect(PictureBounds.clamped(2) == 2)
+    }
+
+    @Test func aVeryTallPictureIsDrawnAtTheShapeItsCroppedTo() throws {
+        let strip = UIImage(data: Self.png(width: 60, height: 900))!
+        let drawn = try Self.drawn(Image(uiImage: strip).resizable().scaledToFill().pictureFrame(aspectRatio: 60.0 / 900.0))
+        #expect(abs(drawn.size.width - 320.0 / 3) < 0.5)
+        #expect(drawn.size.height == 320)
+        #expect(abs(try Self.inkedWidth(of: drawn) - 320.0 / 3) < 1)
+    }
+
+    @Test func aPictureOfNoKnownShapeWaitsInAModestBox() throws {
+        let drawn = try Self.drawn(Color.gray.pictureFrame(expected: nil))
+        #expect(drawn.size == PictureBounds.placeholder)
+        #expect(PictureBounds.placeholder == CGSize(width: 200, height: 150))
+        // Once known, its own shape.
+        let known = try Self.drawn(Color.gray.pictureFrame(expected: 2))
+        #expect(known.size == CGSize(width: 280, height: 140))
+    }
+
+    @Test func aFileWithAPreviewButNoSizeHasNoStoredShape() throws {
+        #expect(AttachmentView.storedAspectRatio(try Self.file(width: nil, height: nil)) == nil)
+        #expect(AttachmentView.storedAspectRatio(try Self.file(width: 400, height: 200)) == 2)
+    }
+
+    // MARK: Remembered sizes
+
+    @Test func aPicturesSizeIsRememberedOnceKnown() {
+        let sizes = PictureSizes(file: nil)
+        let key = PictureSizes.key(file: "file_1")
+        #expect(sizes.size(for: key) == nil)
+        sizes.remember(CGSize(width: 300, height: 100), for: key)
+        #expect(sizes.size(for: key) == CGSize(width: 300, height: 100))
+        // Nothing of no size.
+        sizes.remember(.zero, for: PictureSizes.key(card: "https://example.com/a.png"))
+        #expect(sizes.count == 1)
+        #expect(PictureSizes.key(file: "a") != PictureSizes.key(card: "a"))
+    }
+
+    @Test func rememberedSizesForgetTheOldestPastTheirLimit() {
+        let sizes = PictureSizes(file: nil, limit: 2)
+        for key in ["a", "b", "c"] { sizes.remember(CGSize(width: 1, height: 1), for: key) }
+        #expect(sizes.count == 2)
+        #expect(sizes.size(for: "a") == nil)
+        #expect(sizes.size(for: "c") != nil)
+    }
+
+    @Test func rememberedSizesLastBetweenLaunchesUntilReset() throws {
+        let file = FileManager.default.temporaryDirectory.appending(path: "PictureSizes-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let first = PictureSizes(file: file)
+        first.remember(CGSize(width: 640, height: 480), for: "a")
+        first.save()
+        #expect(PictureSizes(file: file).size(for: "a") == CGSize(width: 640, height: 480))
+
+        first.reset()
+        #expect(first.count == 0)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(PictureSizes(file: file).size(for: "a") == nil)
+    }
+
+    // MARK: Moving pictures
+
+    @Test func aGIFComesBackWithItsFramesAndTiming() async throws {
+        let gif = Self.gif(frames: 6, width: 40, height: 20, delay: 0.05)
+        let loaded = try await ImageLimits.decode(gif, maxPixel: 100).get()
+        #expect(loaded.pixelSize == CGSize(width: 40, height: 20))
+        #expect(loaded.image.images?.count == 6)
+        #expect(abs(loaded.image.duration - 0.3) < 0.01)
+        #expect(ImageLimits.cost(loaded) >= 6 * 40 * 20 * 4)
+    }
+
+    @Test func aGIFWhoseFramesWouldWeighTooMuchKeepsFewerForAsLong() async throws {
+        // Ten frames of 4 MB each against a 16 MB bound.
+        let gif = Self.gif(frames: 10, width: 1_000, height: 1_000, delay: 0.1)
+        let loaded = try await ImageLimits.decode(gif, maxPixel: 1_000).get()
+        let frames = try #require(loaded.image.images)
+        #expect(frames.count > 1 && frames.count <= 4)
+        #expect(ImageLimits.cost(loaded) <= ImageLimits.animationBytes)
+        #expect(abs(loaded.image.duration - 1.0) < 0.01)
+    }
+
+    @Test func aFrameOfNoDelayShowsForATenthOfASecond() throws {
+        let gif = Self.gif(frames: 2, width: 4, height: 4, delay: 0)
+        let source = try #require(CGImageSourceCreateWithData(gif as CFData, nil))
+        #expect(ImageLimits.frameDelay(source, at: 0) == 0.1)
+        let single = try #require(CGImageSourceCreateWithData(Self.png(width: 4, height: 4) as CFData, nil))
+        #expect(ImageLimits.frameDelay(single, at: 0) == 0.1)
+    }
+
+    @Test func aStillPictureComesBackStill() async throws {
+        let loaded = try await ImageLimits.decode(Self.png(width: 8, height: 8), maxPixel: 10).get()
+        #expect(loaded.image.images == nil)
+    }
+
+    // MARK: Files opened in the app
+
+    @Test func aFileIsDownloadedOnceAndKeptUnderItsName() async throws {
+        let (downloads, client, directory) = try Self.downloads(origin: "https://files-once.example.com")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        ImageStub.answer("https://files-once.example.com/files/f?download=1", .body(Data("hello".utf8)))
+        let file = try Self.file(name: "notes.txt")
+        let saved = try await downloads.file(file, client: client)
+        #expect(saved.lastPathComponent == "notes.txt")
+        #expect(try Data(contentsOf: saved) == Data("hello".utf8))
+        _ = try await downloads.file(file, client: client)
+        #expect(ImageStub.requests(to: "files-once.example.com").count == 1)
+
+        downloads.reset()
+        #expect(!FileManager.default.fileExists(atPath: saved.path))
+    }
+
+    @Test func aDownloadCancelledByAResetLeavesTheNextOneForTheSameFileAlone() async throws {
+        let (downloads, client, directory) = try Self.downloads(origin: "https://files-reset.example.com")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        ImageStub.answer("https://files-reset.example.com/files/f?download=1", .hold)
+        let file = try Self.file(name: "held.txt")
+        let first = Task { try await downloads.file(file, client: client) }
+        #expect(await eventually { ImageStub.requests(to: "files-reset.example.com").count == 1 })
+        downloads.reset()
+        let second = Task { try await downloads.file(file, client: client) }
+        #expect(await eventually { ImageStub.requests(to: "files-reset.example.com").count == 2 })
+        _ = await first.result
+        // The second is still on its way, so a third joins it rather than fetching again.
+        let third = Task { try await downloads.file(file, client: client) }
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(ImageStub.requests(to: "files-reset.example.com").count == 2)
+        downloads.reset()
+        _ = await second.result
+        _ = await third.result
+    }
+
+    @Test func aFileThatFailsToDownloadIsNotKept() async throws {
+        let (downloads, client, directory) = try Self.downloads(origin: "https://files-gone.example.com")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = try Self.file(name: "gone.pdf")
+        await #expect(throws: (any Error).self) { try await downloads.file(file, client: client) }
+        #expect(!FileManager.default.fileExists(atPath: downloads.location(of: file).path))
+    }
+
+    @Test func aDownloadCarriesTheSessionOnlyToTheServerItself() throws {
+        let cookies = EphemeralCookieStorage()
+        cookies.setCookie(HTTPCookie(properties: [.name: "session", .value: "s3cret", .domain: "chat.example.com", .path: "/", .secure: "TRUE"])!)
+        let client = EmberClient(origin: URL(string: "https://chat.example.com")!, transport: ImageTransport(.init(), gate: nil), connector: MockSocketConnector(), cookies: cookies)
+        let own = try FileDownloads.request(for: try Self.file(download: "/files/f?download=1"), client: client)
+        #expect(own.value(forHTTPHeaderField: "Cookie")?.contains("s3cret") == true)
+        let signed = try FileDownloads.request(for: try Self.file(download: "https://bucket.example.net/f?sig=1"), client: client)
+        #expect(signed.value(forHTTPHeaderField: "Cookie") == nil)
+
+        var redirected = own
+        redirected.url = URL(string: "https://bucket.example.net/f")
+        #expect(FileDownloads.redirect(redirected, origin: client.origin).value(forHTTPHeaderField: "Cookie") == nil)
+        #expect(FileDownloads.redirect(own, origin: client.origin).value(forHTTPHeaderField: "Cookie") != nil)
+        #expect(VideoViewer.cookies(for: URL(string: "https://chat.example.com/files/v.mp4")!, client: client).count == 1)
+        #expect(VideoViewer.cookies(for: URL(string: "https://bucket.example.net/v.mp4")!, client: client).isEmpty)
+    }
+
+    @Test func onlyTheSameSchemeHostAndPortAreTheServer() {
+        let origin = URL(string: "https://chat.example.com")!
+        #expect(FileDownloads.isSameOrigin(URL(string: "https://CHAT.example.com:443/a")!, origin))
+        #expect(!FileDownloads.isSameOrigin(URL(string: "http://chat.example.com/a")!, origin))
+        #expect(!FileDownloads.isSameOrigin(URL(string: "https://chat.example.com:8443/a")!, origin))
+        #expect(!FileDownloads.isSameOrigin(URL(string: "https://chat.example.com.evil.net/a")!, origin))
+    }
+
+    @Test func aFilesNameStaysInsideItsFolder() {
+        #expect(FileDownloads.safe("../../etc/passwd", otherwise: "file") == "_.._etc_passwd")
+        #expect(FileDownloads.safe(".hidden", otherwise: "file") == "hidden")
+        #expect(FileDownloads.safe("a:b\\c", otherwise: "file") == "a_b_c")
+        #expect(FileDownloads.safe("...", otherwise: "file") == "file")
+        #expect(FileDownloads.safe(String(repeating: "x", count: 500), otherwise: "file").count == 200)
+    }
+
+    @Test func savedFilesPastTheirLimitLoseTheLeastRecentlyUsed() async throws {
+        let (downloads, client, directory) = try Self.downloads(origin: "https://files-trim.example.com", limit: 2_500)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for id in ["a", "b", "c"] {
+            ImageStub.answer("https://files-trim.example.com/files/\(id)", .body(Data(count: 1_000)))
+        }
+        let a = try Self.file(id: "a", download: "/files/a"), b = try Self.file(id: "b", download: "/files/b"), c = try Self.file(id: "c", download: "/files/c")
+        _ = try await downloads.file(a, client: client)
+        try await Task.sleep(for: .milliseconds(20))
+        _ = try await downloads.file(b, client: client)
+        try await Task.sleep(for: .milliseconds(20))
+        _ = try await downloads.file(c, client: client)
+        #expect(!FileManager.default.fileExists(atPath: downloads.location(of: a).path))
+        #expect(FileManager.default.fileExists(atPath: downloads.location(of: b).path))
+        #expect(FileManager.default.fileExists(atPath: downloads.location(of: c).path))
+    }
+
+    // MARK: Long addresses
+
+    @Test func aLongAddressMayWrapAtItsMarksAndWithinLongRuns() {
+        let address = "https://example.com/" + String(repeating: "c", count: 45)
+        let broken = TextBreaks.breakable(address)
+        let opportunity = TextBreaks.opportunity
+        #expect(broken.filter { $0 != opportunity } == address)
+        #expect(broken.hasPrefix("https://\u{200B}example.\u{200B}com/\u{200B}"))
+        // No run longer than `run` without a place to wrap.
+        #expect(broken.split(separator: opportunity).allSatisfy { $0.count <= TextBreaks.run })
+        // Never one at the end.
+        #expect(broken.last != opportunity)
+    }
+
+    @Test func shortWordsAndTheSpacesBetweenWordsAreLeftAlone() {
+        #expect(TextBreaks.breakable("see https://ex.com/a") == "see https://ex.com/a")
+        let text = "a fairly ordinary sentence with no long words in it at all"
+        #expect(TextBreaks.breakable(text) == text)
+        let mixed = "go to https://example.com/some/long/path/here now"
+        let broken = TextBreaks.breakable(mixed)
+        #expect(broken.hasPrefix("go to https://"))
+        #expect(broken.hasSuffix(" now"))
+        #expect(broken.filter { $0 != TextBreaks.opportunity } == mixed)
+    }
+
     // MARK: Helpers
+
+    /// A view as a message's column lays it out: offered more width than a picture needs, and
+    /// whatever height it likes.
+    private static func drawn(_ view: some View) throws -> UIImage {
+        let renderer = ImageRenderer(content: view)
+        renderer.proposedSize = ProposedViewSize(width: 350, height: nil)
+        return try #require(renderer.uiImage)
+    }
+
+    /// How far across, in points, anything at all is drawn in an image.
+    private static func inkedWidth(of image: UIImage) throws -> CGFloat {
+        let source = try #require(image.cgImage)
+        let width = source.width, height = source.height
+        var pixels = [UInt8](repeating: 0, count: width * height * 4)
+        try pixels.withUnsafeMutableBytes { bytes in
+            let context = try #require(CGContext(data: bytes.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                                                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(source, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        var last = -1
+        for y in 0..<height {
+            for x in stride(from: width - 1, to: last, by: -1) where pixels[(y * width + x) * 4 + 3] > 0 {
+                last = x
+                break
+            }
+        }
+        return CGFloat(last + 1) / image.scale
+    }
 
     private static func remote(_ answer: ImageTransport.Answer, gate: AsyncGate? = nil) -> (RemoteImages, EmberClient, ImageTransport) {
         let transport = ImageTransport(answer, gate: gate)
         let client = EmberClient(origin: URL(string: "https://chat.example.com")!, transport: transport, connector: MockSocketConnector(), cookies: EphemeralCookieStorage())
         return (RemoteImages(), client, transport)
+    }
+
+    private static func file(id: String = "file_1", name: String = "f", width: Int? = nil, height: Int? = nil, download: String = "/files/f?download=1") throws -> StoredFile {
+        var object: [String: Any] = [
+            "id": id, "name": name, "contentType": "application/octet-stream", "byteSize": 1_000,
+            "url": "/files/f", "downloadUrl": download, "previewUrl": "/files/f/preview",
+        ]
+        if let width { object["width"] = width }
+        if let height { object["height"] = height }
+        return try JSONDecoder().decode(StoredFile.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+
+    private static func downloads(origin: String, limit: Int = 300 * 1024 * 1024) throws -> (FileDownloads, EmberClient, URL) {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "Files-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let downloads = FileDownloads(directory: directory, limit: limit, protocolClasses: [ImageStub.self])
+        let client = EmberClient(origin: URL(string: origin)!, transport: ImageTransport(.init(), gate: nil), connector: MockSocketConnector(), cookies: EphemeralCookieStorage())
+        return (downloads, client, directory)
+    }
+
+    /// An animated GIF of `frames` frames, each a different grey, shown for `delay` seconds.
+    static func gif(frames: Int, width: Int, height: Int, delay: Double) -> Data {
+        let data = NSMutableData()
+        let destination = CGImageDestinationCreateWithData(data, "com.compuserve.gif" as CFString, frames, nil)!
+        CGImageDestinationSetProperties(destination, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
+        for frame in 0..<frames {
+            let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            let grey = CGFloat(frame) / CGFloat(max(frames, 1))
+            context.setFillColor(red: grey, green: grey, blue: grey, alpha: 1)
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            let properties = [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFUnclampedDelayTime: delay, kCGImagePropertyGIFDelayTime: delay]]
+            CGImageDestinationAddImage(destination, context.makeImage()!, properties as CFDictionary)
+        }
+        CGImageDestinationFinalize(destination)
+        return data as Data
     }
 
     static func png(width: Int, height: Int) -> Data {
@@ -495,6 +916,8 @@ final class ImageStub: URLProtocol {
         case redirect(String)
         case status(Int)
         case fail
+        /// Never answers, as a download still on its way.
+        case hold
     }
 
     private static let lock = NSLock()
@@ -536,6 +959,8 @@ final class ImageStub: URLProtocol {
             client?.urlProtocolDidFinishLoading(self)
         case .fail:
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+        case .hold:
+            break
         }
     }
 

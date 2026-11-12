@@ -2,9 +2,10 @@ import Foundation
 import Testing
 import UIKit
 import EmberSDK
+import EmberTesting
 @testable import Ember
 
-/// What the composer sends for a draft, and how staged copies are made, kept and cleared away. Each
+/// How staged copies are made, kept and cleared away. Each
 /// test stages under a folder of its own, never the real `Uploads`, which a launch sweeps.
 @MainActor
 @Suite final class ComposerAndStagingTests {
@@ -51,24 +52,19 @@ import EmberSDK
         ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).sorted()
     }
 
-    // MARK: What's sent
+    // MARK: Sending
 
-    @Test func aDraftGoesAsTypedWithItsSpacesAndBlankLines() throws {
-        let message = try #require(RoomComposer.outgoing("\n  hello \n\nthere  \n\n"))
-        #expect(message.body == "<p><br>  hello <br><br>there  <br><br></p>")
-        // The server's plain text for that body: the newlines it ends with dropped, nothing else.
-        #expect(message.plainText == "\n  hello \n\nthere  ")
-    }
-
-    @Test func aDraftsCarriageReturnsBreakLinesAsTheBodyDoes() throws {
-        let message = try #require(RoomComposer.outgoing("a\r\nb\rc\r\n"))
-        #expect(message.body == "<p>a<br>b<br>c<br></p>")
-        #expect(message.plainText == "a\nb\nc")
-    }
-
-    @Test func aBlankDraftSendsNoText() {
-        #expect(RoomComposer.outgoing("") == nil)
-        #expect(RoomComposer.outgoing("  \n\t \r\n ") == nil)
+    @Test func aDraftTheRoomRefusesKeepsItsStagedFiles() throws {
+        let room = RoomSession(client: EmberClient(origin: URL(string: "https://chat.example.com")!), roomID: Fixtures.general.id, unsentStore: MemoryUnsentMessageStore())
+        let files = StagedFiles()
+        let file = try staged("photo.jpg")
+        files.append(file)
+        let draft = Draft(text: String(repeating: "a", count: Limits.message + 1))
+        #expect(throws: EmberError.self) {
+            try RoomComposer.send(draft, staged: files, room: room, thread: nil, alsoSend: false)
+        }
+        #expect(files.files.map(\.id) == [file.id])
+        #expect(exists(file.source.fileURL))
     }
 
     // MARK: Sweeping

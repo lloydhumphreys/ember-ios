@@ -15,7 +15,12 @@ enum MessagePlace {
 }
 
 /// One message as Slack and Ember's web lay it out: the author's face and name over the first of
-/// a run, and the body, attachment, boosts and thread summary beneath.
+/// a run, and the body, attachment, boosts and thread summary beneath. At the accessibility text
+/// sizes the face moves beside the name, over the body, so the name and the body have the width.
+///
+/// VoiceOver reads the author, time, text, boosts and replies as one element, with what the
+/// context menu offers, each link in the text, and Show more as its actions. An attachment or a
+/// bot's cards follow it as elements of their own.
 struct MessageRow: View {
     let message: Message
     /// Follows on from the same person's message, so it goes without the face and name.
@@ -29,21 +34,34 @@ struct MessageRow: View {
     var place: MessagePlace = .room
 
     @Environment(Workspace.self) private var workspace
-    @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 36
+    @Environment(\.openURL) private var openURL
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @ScaledMetric(relativeTo: .body) private var scaledAvatar: CGFloat = 36
+    @ScaledMetric(relativeTo: .body) private var lineHeight: CGFloat = 22
     /// Held by the row, so the confirmation's popover comes from the message it's about.
     @State private var isConfirmingDelete = false
 
+    private var myID: UserID { me?.id ?? workspace.me.id }
+
     private var mentionsMe: Bool {
-        let myID = me?.id ?? workspace.me.id
-        return message.mentions.contains { $0.id == myID }
+        message.mentions.contains { $0.id == myID }
     }
+
+    /// The face over the body rather than beside it, at the accessibility text sizes.
+    private var isStacked: Bool { typeSize.isAccessibilitySize }
+
+    private var avatarSize: CGFloat { MessageRowLayout.avatarSize(scaledAvatar, isStacked: isStacked) }
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            gutter
+            if !isStacked { gutter }
             VStack(alignment: .leading, spacing: 4) {
-                if !grouped || message.isDeleted { header }
-                content
+                lead
+                if !message.isDeleted {
+                    extras
+                    ChangeFailures(message: message, me: myID)
+                }
+                threadSummary
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -51,11 +69,13 @@ struct MessageRow: View {
         .padding(.top, grouped ? 2 : 10)
         .padding(.bottom, 2)
         .background(background)
-        .overlay(alignment: .leading) {
-            if mentionsMe, !message.isDeleted {
-                Rectangle()
-                    .fill(Color.accentColor)
-                    .frame(width: 3)
+        .opaqueContextMenuPreview()
+        .overlay(alignment: .topLeading) {
+            if mentionsMe, !message.isDeleted { mentionMark }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !message.isDeleted, SentChanges.shared.isSendingChange(to: message.id) {
+                ChangeWaiting().padding(.trailing, 16).padding(.bottom, 4)
             }
         }
         // The whole width, blank space beside a short message included, both takes the long
@@ -63,90 +83,149 @@ struct MessageRow: View {
         // their own and still take their taps first.
         .contentShape([.interaction, .contextMenuPreview], .rect)
         .contextMenu { menu }
+        .accessibilityElement(children: .contain)
         .deleteConfirmation("Delete this message?", isPresented: $isConfirmingDelete) {
-            session.delete(message.id)
+            let session = session, actions = actions, id = message.id
+            SentChanges.shared.start(.delete(id), isDone: { actions.showsDeleted(id) }) {
+                try await session.delete(message: id)
+            }
         }
     }
 
     @ViewBuilder private var gutter: some View {
         if message.isDeleted {
-            // A blank square where the face was, as the web leaves a deleted message.
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color(.secondarySystemFill))
-                .frame(width: avatarSize, height: avatarSize)
+            tombstone
         } else if grouped {
             Color.clear.frame(width: avatarSize, height: 1)
         } else {
-            AvatarView(userID: message.creator.id, name: workspace.name(of: message.creator), size: avatarSize)
+            avatar
         }
     }
 
-    @ViewBuilder private var header: some View {
-        if !message.isDeleted {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                HStack(spacing: 3) {
-                    Text(workspace.name(of: message.creator))
-                        .font(.subheadline.weight(.bold))
-                        .lineLimit(1)
-                    if workspace.isAssistant(message.creator.id) {
-                        Image(systemName: "sparkle")
-                            .font(.caption)
-                            .foregroundStyle(.tint)
-                            .accessibilityHidden(true)
-                    }
-                }
-                Text(message.createdAt, format: .dateTime.hour().minute())
-                    .font(.caption)
+    private var avatar: some View {
+        AvatarView(userID: message.creator.id, name: workspace.name(of: message.creator), size: avatarSize)
+    }
+
+    /// A blank square where the face was, as the web leaves a deleted message.
+    private var tombstone: some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(Color(.secondarySystemFill))
+            .frame(width: avatarSize, height: avatarSize)
+            .accessibilityHidden(true)
+    }
+
+    /// A mention of you: a bar down the leading edge and an @ beside it, so it isn't told by
+    /// colour alone. Held to a small size so it stays in the margin.
+    private var mentionMark: some View {
+        HStack(alignment: .top, spacing: 1) {
+            Rectangle()
+                .fill(Color.accentColor)
+                .frame(width: 3)
+            Image(systemName: "at")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.tint)
+                .dynamicTypeSize(...DynamicTypeSize.large)
+                .padding(.top, grouped ? 4 : 12)
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// Who, when, and what: the one element VoiceOver reads for the message, with the row's
+    /// actions on it.
+    private var lead: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if message.isDeleted {
+                if isStacked { tombstone }
+                Text("This message was deleted.")
+                    .font(.body.italic())
                     .foregroundStyle(.secondary)
-                if message.editedAt != nil {
+            } else {
+                if !grouped { header }
+                if place == .room, message.parentId != nil {
+                    Button { actions.openThread(.to(message)) } label: {
+                        ThreadQuote(text: message.parentText ?? "")
+                    }
+                    .buttonStyle(.plain)
+                }
+                messageText
+                if grouped, message.editedAt != nil {
                     Text("(edited)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
-            .accessibilityElement(children: .combine)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(spokenLabel)
+        .accessibilityActions { accessibilityActions }
+    }
+
+    @ViewBuilder private var header: some View {
+        let name = workspace.name(of: message.creator)
+        let title = MessageHeaderTitle(name: name, isAssistant: workspace.isAssistant(message.creator.id))
+        if isStacked {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .center, spacing: 8) {
+                    avatar
+                    title
+                }
+                timeLine
+            }
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                title.layoutPriority(1)
+                timeLine
+            }
         }
     }
 
-    @ViewBuilder private var content: some View {
-        if message.isDeleted {
-            Text("This message was deleted.")
-                .font(.body.italic())
-                .foregroundStyle(.secondary)
-            threadSummary
-        } else {
-            if place == .room, message.parentId != nil {
-                Button { actions.openThread(.to(message)) } label: {
-                    ThreadQuote(text: message.parentText ?? "")
-                }
-                .buttonStyle(.plain)
-            }
-            let host = self.host
-            let cards = DocumentCache.shared.cards(for: message, host: host)
-            let document = DocumentCache.shared.document(for: message, host: host)
-            switch MessageText.of(message, document: document, shownCards: cards) {
-            case .body: RichTextView(document: document)
-            case .plainText: Text(message.plainText)
-            case .none: EmptyView()
-            }
-            if grouped, message.editedAt != nil {
+    private var timeLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(message.createdAt, format: MessageSpeech.timeFormat)
+            if message.editedAt != nil {
                 Text("(edited)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
-            if let file = message.attachment {
-                AttachmentView(file: file)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .fixedSize()
+    }
+
+    @ViewBuilder private var messageText: some View {
+        let document = DocumentCache.shared.document(for: message, host: host)
+        switch MessageText.of(message, document: document, shownCards: shownCards) {
+        case .body:
+            if MessageFolds.shared.isLong(message) {
+                FoldedText(messageID: message.id, document: document, fallbackLine: lineHeight, place: place)
+            } else {
+                MessageBody(document: document)
             }
-            if !cards.isEmpty {
-                CardsView(cards: cards)
-            }
-            if !message.boosts.isEmpty {
-                BoostsView(message: message, me: me, session: session, customBoost: actions.customBoost)
-                    .padding(.top, 2)
-            }
-            threadSummary
+        case .plainText: Text(message.plainText)
+        case .none: EmptyView()
         }
     }
+
+    /// What follows the text: the attachment, the cards, and the boosts.
+    @ViewBuilder private var extras: some View {
+        if let file = message.attachment {
+            AttachmentView(file: file)
+        }
+        let cards = shownCards
+        if !cards.isEmpty {
+            CardsView(cards: cards)
+        }
+        if !message.boosts.isEmpty {
+            let actions = actions, id = message.id
+            BoostsView(message: message, me: me, session: session, customBoost: actions.customBoost) {
+                actions.showsRemoved(boost: $0, from: id)
+            }
+            .padding(.top, 2)
+            // Read with the message, and taken back through its actions.
+            .accessibilityHidden(true)
+        }
+    }
+
+    private var shownCards: [Card] { DocumentCache.shared.cards(for: message, host: host) }
 
     private var host: String { workspace.client.origin.host() ?? "" }
 
@@ -157,6 +236,8 @@ struct MessageRow: View {
             }
             .buttonStyle(.plain)
             .padding(.top, 2)
+            // Read with the message, and opened through its actions.
+            .accessibilityHidden(true)
         }
     }
 
@@ -167,6 +248,59 @@ struct MessageRow: View {
             Color.accentColor.opacity(0.08)
         }
     }
+
+    // MARK: VoiceOver
+
+    private var spokenLabel: String {
+        MessageSpeech.label(
+            author: workspace.name(of: message.creator),
+            isAssistant: workspace.isAssistant(message.creator.id),
+            time: message.createdAt.formatted(MessageSpeech.timeFormat),
+            text: message.plainText,
+            isEdited: message.editedAt != nil,
+            isDeleted: message.isDeleted,
+            mentionsMe: mentionsMe,
+            boosts: BoostGroup.of(message.boosts, myID: myID),
+            replies: place == .room ? message.thread?.count ?? 0 : 0)
+    }
+
+    @ViewBuilder private var accessibilityActions: some View {
+        if !message.isDeleted {
+            let document = DocumentCache.shared.document(for: message, host: host)
+            ForEach(Array(MessageSpeech.links(in: document).enumerated()), id: \.offset) { _, link in
+                if let url = workspace.client.url(link.url) {
+                    Button("Open \(link.text)") { openURL(url) }
+                }
+            }
+            if MessageFolds.shared.isLong(message) {
+                Button(MessageFold.buttonTitle(isOpen: MessageFolds.shared.isOpen(message.id, in: place))) {
+                    MessageFolds.shared.toggle(message.id, in: place)
+                }
+            }
+        }
+        if place == .room, let thread = message.thread, thread.count > 0 {
+            Button("Open Thread") { actions.openThread(.thread(of: message)) }
+        } else if place == .room, message.parentId != nil, !message.isDeleted {
+            Button("Open Thread") { actions.openThread(.to(message)) }
+        }
+        if message.isDeleted {
+            if place == .room { replyInThread }
+        } else {
+            if place == .room { replyInThread }
+            Button("React") { actions.customBoost(message) }
+            ForEach(BoostGroup.of(message.boosts, myID: myID).compactMap(\.mine)) { mine in
+                Button("Remove Reaction \(mine.content)") {
+                    let session = session, actions = actions, id = message.id
+                    SentChanges.shared.start(.removeBoost(id, mine.id), isDone: { actions.showsRemoved(boost: mine.id, from: id) }) {
+                        try await session.removeBoost(id: mine.id)
+                    }
+                }
+            }
+            editingActions
+        }
+    }
+
+    // MARK: Menu
 
     @ViewBuilder private var menu: some View {
         if message.isDeleted {
@@ -184,10 +318,15 @@ struct MessageRow: View {
     }
 
     @ViewBuilder private var liveMenu: some View {
+        ReactionRow(reactions: BoostChoices.quick, message: message, session: session)
         if place == .room { replyInThread }
-        Menu("Boost", systemImage: "face.smiling") {
+        Menu("React", systemImage: "face.smiling") {
             BoostChoices(message: message, session: session, customBoost: actions.customBoost)
         }
+        editingActions
+    }
+
+    @ViewBuilder private var editingActions: some View {
         Button("Copy", systemImage: "doc.on.doc") {
             UIPasteboard.general.string = message.plainText
         }
@@ -196,13 +335,210 @@ struct MessageRow: View {
             actions.selectText(message.plainText)
         }
         .disabled(message.plainText.isEmpty)
-        let changes = MessageChanges.of(message, myID: me?.id ?? workspace.me.id, isAdministrator: workspace.me.administrator)
+        let changes = MessageChanges.of(message, myID: myID, isAdministrator: workspace.me.administrator)
         if changes.canEdit {
             Button("Edit", systemImage: "pencil") { actions.edit(message) }
         }
         if changes.canDelete {
             Button("Delete", systemImage: "trash", role: .destructive) { isConfirmingDelete = true }
+                .disabled(SentChanges.shared.isSending(.delete(message.id)))
         }
+    }
+}
+
+/// Sizes a message row takes from the text size.
+enum MessageRowLayout {
+    /// The largest a face grows, at the accessibility text sizes, where it sits beside the name.
+    static let largestStackedAvatar: CGFloat = 48
+
+    static func avatarSize(_ scaled: CGFloat, isStacked: Bool) -> CGFloat {
+        isStacked ? min(scaled, largestStackedAvatar) : scaled
+    }
+}
+
+/// The author's name, and the assistant's sparkle after it, as one text that wraps rather than
+/// being cut.
+private struct MessageHeaderTitle: View {
+    let name: String
+    let isAssistant: Bool
+
+    var body: some View {
+        Group {
+            if isAssistant {
+                Text("\(Text(name)) \(Text(Image(systemName: "sparkle")).font(.caption).foregroundStyle(.tint))")
+            } else {
+                Text(name)
+            }
+        }
+        .font(.subheadline.weight(.bold))
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A message's text. Only emoji shows large, as the web has it, but held below the largest
+/// accessibility sizes, where the large title would fill the screen with a few faces.
+struct MessageBody: View {
+    let document: RichDocument
+
+    /// The largest text size an emoji-only message follows.
+    static let largestEmojiSize = DynamicTypeSize.accessibility1
+
+    var body: some View {
+        RichTextView(document: document)
+            .dynamicTypeSize(...(document.isEmojiOnly ? Self.largestEmojiSize : .accessibility5))
+    }
+}
+
+extension EnvironmentValues {
+    /// Whether long messages keep the fold they had, whatever's asked for meanwhile: while the
+    /// timeline is off screen, behind a thread pushed over it. A row whose height changes there
+    /// leaves the timeline's height where the old one put it, with nothing past the last row; the
+    /// fold made meanwhile is taken up once the timeline is back on screen.
+    @Entry var holdsFolds = false
+}
+
+/// A long message's text: its first lines whole behind Show more, all of it behind Show less.
+/// Open or folded is kept in `MessageFolds`, so it survives the row being made again. The fold is
+/// measured from the text's lines as it's laid out, and the measurement is state here, so the row
+/// is laid out again at it before it's drawn rather than drawn at a guess.
+private struct FoldedText: View {
+    let messageID: String
+    let document: RichDocument
+    /// One line's height, for the fold before the text is measured.
+    let fallbackLine: CGFloat
+    var place: MessagePlace = .room
+
+    /// Where the fold falls in this row's text, once measured.
+    @State private var measured: CGFloat?
+    /// Open or folded as it was when the timeline went off screen (see `holdsFolds`).
+    @State private var heldOpen: Bool?
+    @Environment(\.holdsFolds) private var holdsFolds
+
+    var body: some View {
+        let folds = MessageFolds.shared
+        let isOpen = heldOpen ?? folds.isOpen(messageID, in: place)
+        VStack(alignment: .leading, spacing: 2) {
+            // Laid out whole at its own height whatever it's offered, so its lines are where
+            // they'll be drawn, then cut under the last line shown.
+            MessageBody(document: document)
+                .fixedSize(horizontal: false, vertical: true)
+                .backgroundPreferenceValue(Text.LayoutKey.self) { layouts in
+                    GeometryReader { proxy in
+                        Color.clear.onChange(of: Self.foldHeight(layouts, in: proxy), initial: true) { _, height in
+                            guard let height else { return }
+                            folds.setFoldHeight(height, for: messageID)
+                            if measured.map({ abs($0 - height) >= 0.5 }) ?? true { measured = height }
+                        }
+                    }
+                }
+                .frame(height: isOpen ? nil : foldHeight(folds), alignment: .top)
+                .clipped()
+            Button(MessageFold.buttonTitle(isOpen: isOpen)) { folds.toggle(messageID, in: place) }
+                .font(.subheadline.weight(.medium))
+                .buttonStyle(.borderless)
+                .padding(.vertical, 4)
+                .contentShape(.rect)
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .scrollView).minY } action: { y in
+            folds.setTop(y, for: messageID, in: place)
+        }
+        .onDisappear { folds.setTop(nil, for: messageID, in: place) }
+        .onChange(of: holdsFolds, initial: true) { _, holds in
+            heldOpen = holds ? folds.isOpen(messageID, in: place) : nil
+        }
+    }
+
+    /// As measured in this row, else as last measured in another, else ten lines' guess.
+    private func foldHeight(_ folds: MessageFolds) -> CGFloat {
+        measured ?? folds.foldHeight(messageID) ?? fallbackLine * CGFloat(MessageFold.shownLines)
+    }
+
+    /// Where the fold cuts, from every line of every text view in the message's text.
+    private static func foldHeight(_ layouts: Text.LayoutKey.Value, in proxy: GeometryProxy) -> CGFloat? {
+        var spans: [ClosedRange<CGFloat>] = []
+        for text in layouts {
+            let top = proxy[text.origin].y
+            for line in text.layout {
+                let bounds = line.typographicBounds.rect
+                spans.append((top + bounds.minY)...(top + bounds.maxY))
+            }
+        }
+        return CardFold.height(lineSpans: spans, lines: MessageFold.shownLines)
+    }
+}
+
+/// What VoiceOver says for a message row, and the links it offers as actions.
+enum MessageSpeech {
+    static let timeFormat = Date.FormatStyle.dateTime.hour().minute()
+
+    /// Who and when, whether it mentions you, the text, then its boosts and replies.
+    static func label(
+        author: String, isAssistant: Bool, time: String, text: String, isEdited: Bool, isDeleted: Bool,
+        mentionsMe: Bool, boosts: [BoostGroup], replies: Int
+    ) -> String {
+        var parts: [String] = []
+        if isDeleted {
+            parts.append("This message was deleted.")
+        } else {
+            parts.append("\(author)\(isAssistant ? ", assistant" : ""), \(time).")
+            if mentionsMe { parts.append("Mentions you.") }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { parts.append(sentence(trimmed)) }
+            if isEdited { parts.append("Edited.") }
+            if !boosts.isEmpty {
+                parts.append("Reactions: " + boosts.map(\.spoken).joined(separator: "; ") + ".")
+            }
+        }
+        if replies > 0 { parts.append(replies == 1 ? "1 reply." : "\(replies) replies.") }
+        return parts.joined(separator: " ")
+    }
+
+    /// Text ending as a sentence, so VoiceOver pauses before what follows.
+    private static func sentence(_ text: String) -> String {
+        guard let last = text.last, !".!?…:".contains(last) else { return text }
+        return text + "."
+    }
+
+    /// Each link in a message's text, with what it says, in reading order.
+    static func links(in document: RichDocument) -> [(url: String, text: String)] {
+        var found: [(url: String, text: String)] = []
+        func inlines(_ items: [RichInline]) {
+            for item in items {
+                if case .link(let url, let children) = item {
+                    let text = plain(children).trimmingCharacters(in: .whitespacesAndNewlines)
+                    found.append((url, text.isEmpty ? url : text))
+                }
+            }
+        }
+        func blocks(_ items: [RichBlock]) {
+            for block in items {
+                switch block {
+                case .paragraph(let items), .heading(_, let items): inlines(items)
+                case .quote(let children): blocks(children)
+                case .list(_, _, let items): items.forEach(blocks)
+                case .table(let header, let rows):
+                    header?.forEach(inlines)
+                    rows.forEach { $0.forEach(inlines) }
+                case .preview(let preview):
+                    if let href = preview.href { found.append((href, preview.title.isEmpty ? href : preview.title)) }
+                case .codeBlock, .rule: break
+                }
+            }
+        }
+        blocks(document.blocks)
+        return found
+    }
+
+    private static func plain(_ items: [RichInline]) -> String {
+        items.map { item in
+            switch item {
+            case .text(let text, _): text
+            case .link(_, let children): plain(children)
+            case .mention: ""
+            case .lineBreak: " "
+            }
+        }
+        .joined()
     }
 }
 
@@ -239,7 +575,7 @@ private struct ThreadSummaryView: View {
             HStack(spacing: -4) {
                 ForEach(thread.people.prefix(3)) { person in
                     AvatarView(userID: person.id, name: workspace.name(of: person), size: faceSize)
-                        .overlay(Circle().strokeBorder(Color(.systemBackground), lineWidth: 1.5))
+                        .overlay(AvatarView.shape(faceSize).strokeBorder(Color(.systemBackground), lineWidth: 1.5))
                 }
             }
             Text("^[\(thread.count) reply](inflect: true)")
@@ -253,8 +589,9 @@ private struct ThreadSummaryView: View {
     }
 }
 
-/// A message on its way: dimmed until the room has it, and with its failure, Retry and Discard
-/// when the room refused it. A file shows its picture or row with how far it's got.
+/// A message on its way: dimmed until the room has it, however long the connection is down, and
+/// with its failure, Retry and Discard when the room refused it or never answered on an open
+/// connection. A file shows its picture or row with how far it's got.
 struct PendingRow: View {
     let pending: PendingMessage
     let grouped: Bool
@@ -291,7 +628,7 @@ struct PendingRow: View {
                 }
                 if let failure = pending.failure {
                     HStack(spacing: 12) {
-                        Label(failure, systemImage: "exclamationmark.circle")
+                        Label(Self.failureText(failure), systemImage: "exclamationmark.circle")
                             .font(.footnote)
                             .foregroundStyle(.red)
                         Button("Retry") { retry(pending.clientMessageId) }
@@ -311,6 +648,8 @@ struct PendingRow: View {
         .padding(.horizontal, 16)
         .padding(.top, grouped ? 2 : 10)
         .padding(.bottom, 2)
+        .announcesWhenShown(pending.failure.map(Self.failureText))
+        .opaqueContextMenuPreview()
         .contentShape([.interaction, .contextMenuPreview], .rect)
         .contextMenu {
             // A file's plain text is only its name.
@@ -324,6 +663,12 @@ struct PendingRow: View {
 
     private var myID: UserID { me?.id ?? workspace.me.id }
     private var myName: String { workspace.name(ofUserID: myID) ?? me?.name ?? workspace.me.name }
+
+    /// What a failed message says before Retry and Discard: the room's refusal as it worded it, or,
+    /// for one the room never answered, as short as a failed file's "Upload failed".
+    static func failureText(_ failure: String) -> String {
+        failure == RoomSession.notSent ? "Not sent" : failure
+    }
 }
 
 /// A message's text in a sheet where any part of it can be selected, which a `Text` in a list

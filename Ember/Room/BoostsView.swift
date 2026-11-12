@@ -1,67 +1,112 @@
 import SwiftUI
 import EmberSDK
 
-/// A message's boosts, one chip each as the web shows them: the booster's face and what they
-/// boosted with. Your own chip takes the boost back; the last control adds one.
+/// Boosts of one kind on a message: what was boosted, who boosted it in the order they did, and
+/// your own boost of it, if you made one.
+struct BoostGroup: Identifiable, Equatable {
+    let content: String
+    var boosters: [User]
+    /// Yours, which its chip takes back.
+    var mine: Boost?
+
+    var id: String { content }
+    var count: Int { boosters.count }
+    var isMine: Bool { mine != nil }
+
+    /// One group for each thing boosted, in the order each was first boosted.
+    static func of(_ boosts: [Boost], myID: UserID) -> [BoostGroup] {
+        var groups: [BoostGroup] = []
+        var index: [String: Int] = [:]
+        for boost in boosts {
+            let at: Int
+            if let known = index[boost.content] {
+                at = known
+            } else {
+                at = groups.count
+                index[boost.content] = at
+                groups.append(BoostGroup(content: boost.content, boosters: []))
+            }
+            groups[at].boosters.append(boost.booster)
+            if boost.booster.id == myID, groups[at].mine == nil { groups[at].mine = boost }
+        }
+        return groups
+    }
+
+    /// What VoiceOver says for it: what was boosted, how many times, and whether you did.
+    var spoken: String {
+        let whose = isMine ? (count == 1 ? ", yours" : ", including yours") : ""
+        return "\(content) \(count)\(whose)"
+    }
+}
+
+/// A message's boosts, one chip for each thing boosted with how many boosted it, as Slack groups
+/// reactions. Yours are marked, and your chip takes your boost back; every chip lists who boosted.
+/// The last control adds one.
 struct BoostsView: View {
     let message: Message
     let me: User?
     let session: RoomSession
     let customBoost: (Message) -> Void
+    /// Whether the screen shows the boost with this id gone, so a removal that failed to answer
+    /// made it.
+    var showsRemoved: (String) -> Bool = { _ in false }
 
     @Environment(Workspace.self) private var workspace
-    @ScaledMetric(relativeTo: .footnote) private var faceSize: CGFloat = 18
+    @ScaledMetric(relativeTo: .footnote) private var chipHeight: CGFloat = 28
 
     var body: some View {
         FlowLayout(spacing: 6) {
-            ForEach(message.boosts) { boost in
-                chip(boost)
+            ForEach(BoostGroup.of(message.boosts, myID: me?.id ?? workspace.me.id)) { group in
+                chip(group)
             }
             BoostMenu(message: message, session: session, customBoost: customBoost) {
                 Image(systemName: "plus")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
-                    .frame(minHeight: faceSize + 10)
+                    .frame(minHeight: chipHeight)
                     .background(Capsule().strokeBorder(.separator))
                     .contentShape(Capsule())
             }
-            .accessibilityLabel("Add Boost")
+            .accessibilityLabel("Add Reaction")
         }
     }
 
-    @ViewBuilder private func chip(_ boost: Boost) -> some View {
-        let name = workspace.name(of: boost.booster)
-        let face = HStack(spacing: 4) {
-            AvatarView(userID: boost.booster.id, name: name, size: faceSize)
-            Text(boost.content)
-                .font(.footnote)
-                .lineLimit(1)
-        }
-        .padding(.leading, 4)
-        .padding(.trailing, 8)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(isMine(boost) ? Color.accentColor.opacity(0.15) : Color(.secondarySystemBackground)))
-        .background(Capsule().strokeBorder(isMine(boost) ? Color.accentColor.opacity(0.5) : Color.clear))
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(name) boosted \(boost.content)")
-
-        if isMine(boost) {
-            Menu {
-                Button("Remove Boost", systemImage: "minus.circle", role: .destructive) {
-                    session.removeBoost(boost.id)
+    private func chip(_ group: BoostGroup) -> some View {
+        Menu {
+            Section {
+                ForEach(Array(group.boosters.enumerated()), id: \.offset) { _, booster in
+                    Text(workspace.name(of: booster))
                 }
-            } label: {
-                face
             }
-            .buttonStyle(.plain)
-        } else {
-            face
+            if let mine = group.mine {
+                let key = SentChanges.Key.removeBoost(message.id, mine.id)
+                Button("Remove Reaction", systemImage: "minus.circle", role: .destructive) {
+                    let session = session, showsRemoved = showsRemoved
+                    SentChanges.shared.start(key, isDone: { showsRemoved(mine.id) }) {
+                        try await session.removeBoost(id: mine.id)
+                    }
+                }
+                .disabled(SentChanges.shared.isSending(key))
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(group.content)
+                    .lineLimit(1)
+                Text(group.count, format: .number)
+                    .monospacedDigit()
+                    .fontWeight(group.isMine ? .semibold : .regular)
+                    .foregroundStyle(group.isMine ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+            }
+            .font(.footnote)
+            .padding(.horizontal, 10)
+            .frame(minHeight: chipHeight)
+            .background(Capsule().fill(group.isMine ? Color.accentColor.opacity(0.15) : Color(.secondarySystemBackground)))
+            .background(Capsule().strokeBorder(group.isMine ? Color.accentColor.opacity(0.5) : Color.clear))
+            .contentShape(Capsule())
         }
-    }
-
-    private func isMine(_ boost: Boost) -> Bool {
-        boost.booster.id == (me?.id ?? workspace.me.id)
+        .buttonStyle(.plain)
+        .accessibilityLabel(group.spoken)
     }
 }
 
@@ -89,17 +134,38 @@ struct BoostChoices: View {
     let customBoost: (Message) -> Void
 
     /// The reactions in rows of the same kind, as many to a row as a compact menu group holds.
-    private static let perRow = 4
+    static let perRow = 4
+
+    /// The reactions a hold on a message offers before anything else: the commonest, one row of them.
+    static let quick = ["👍", "❤️", "😂", "🎉"]
 
     var body: some View {
         ForEach(Array(stride(from: 0, to: Reactions.all.count, by: Self.perRow)), id: \.self) { start in
-            ControlGroup {
-                ForEach(Reactions.all[start..<min(start + Self.perRow, Reactions.all.count)], id: \.self) { reaction in
-                    Button(reaction) { session.boost(message.id, content: reaction) }
-                }
-            }
-            .controlGroupStyle(.compactMenu)
+            ReactionRow(reactions: Array(Reactions.all[start..<min(start + Self.perRow, Reactions.all.count)]), message: message, session: session)
         }
         Button("Other…", systemImage: "character.cursor.ibeam") { customBoost(message) }
+    }
+
+    /// Boosts `message` through the room's `async` call, which says whether the room made it.
+    static func boost(_ message: Message, with content: String, in session: RoomSession) {
+        let id = message.id
+        SentChanges.shared.start(.boost(id, content)) { try await session.boost(message: id, content: content) }
+    }
+}
+
+/// Reactions side by side in a menu, each a tap to react with.
+struct ReactionRow: View {
+    let reactions: [String]
+    let message: Message
+    let session: RoomSession
+
+    var body: some View {
+        ControlGroup {
+            ForEach(reactions, id: \.self) { reaction in
+                Button(reaction) { BoostChoices.boost(message, with: reaction, in: session) }
+                    .disabled(SentChanges.shared.isSending(.boost(message.id, reaction)))
+            }
+        }
+        .controlGroupStyle(.compactMenu)
     }
 }

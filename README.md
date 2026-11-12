@@ -19,39 +19,47 @@ An iPhone app for [Ember](https://github.com/NYLLON-SOFTWARE/ember-cloudflare), 
 
 ## Status
 
-The app has been built and tested against the SDK's stand-in server, which mirrors Ember's protocol and tracks Ember release 0.4.2. It has not yet been exercised end to end against a production Ember server. It runs on iPhone only; there is no iPad layout.
+The app has been tested mostly against the SDK's stand-in server, which mirrors Ember's protocol as of Ember release 0.4.2, with some use against a real Ember deployment. It runs on iPhone only; there is no iPad layout.
 
-There are no push notifications. Ember's server delivers Web Push to browser push services only, so a native app needs a change on the server first.
+There are no push notifications. Ember's server sends Web Push only to a short list of browser push services, so a native app needs a change on the server first. [docs/push-notifications.md](docs/push-notifications.md) sets out the options.
 
 ## What it covers
 
-**Connecting and signing in.** You enter a server address, and the app checks that it is an Ember server. It then signs in with email and password, or with just a name when the server allows guests. The server and the session are remembered between launches. A server that hasn't been set up yet is opened in Safari for first-run setup.
+**Connecting and signing in.** You enter a server address, and the app checks that it is an Ember server. It then signs in with email and password, or with just a name when the server allows guests. Forgot Password opens the server's reset page in Safari. The server and the session are remembered between launches. A server that hasn't been set up yet is opened in Safari for first-run setup. If the server can't be reached, the app retries on its own and again as soon as the network comes back.
 
-**Home.** Rooms, with starred ones first, and direct messages, with suggested people to start one with. Swipe a row to star it or mute it. Long-press a row to set its notification level. Unread rooms are bold and muted rooms are dimmed. New Message starts a direct message with one or more people from the directory. The account menu has an appearance setting (system, light or dark) and Sign Out.
+**Accounts.** You can be signed in to several accounts, on the same server or different ones. Tap your avatar for the account menu: switch accounts, Add Account, choose an appearance (system, light or dark), or Sign Out. Each account is kept apart, with its own cookies, drafts and caches. Only the account on screen is connected.
 
-**Activity.** Unread rooms, with the count on the tab.
+**Home.** The tab bar has Home, Activity and Search, and an orange + button floats above it for a new message. Home lists rooms, with starred ones first, and direct messages, with suggested people to start one with. Pull to refresh. Swipe a row to star it or mute it. Long-press a row to set its notification level. Unread rooms are bold and muted rooms are dimmed. New Message starts a direct message with one or more people from the directory. The app reopens the tab, room or thread you were last in.
 
-**Rooms.** The timeline is newest at the bottom, pages in older and newer history as you scroll, and has a Jump to Latest button. Messages fall under day headings, and messages one person sends close together are grouped. Messages that mention you are highlighted. Edited and deleted messages are marked. Typing indicators are shown, and the room is marked read as you open and leave it. The back button shows how many other rooms are unread.
+**Activity.** Unread rooms and direct messages, with the count on the tab.
 
-**Messages.** Long-press a message to reply in a thread, boost it (from presets or your own text), copy it, select its text, edit it or delete it. Edit and delete are offered only where Ember allows them. Boosts show as chips under the message. Tap your own boost to remove it, or tap + to add one.
+**Rooms.** The timeline is newest at the bottom, pages in older and newer history as you scroll, and has a Jump to Latest button. Messages fall under day headings, and messages one person sends close together are grouped. Messages that mention you are highlighted. Edited and deleted messages are marked. Typing indicators are shown, and the room is marked read as you open and leave it. The back button shows how many other rooms are unread. Tapping the room's title opens its details: notifications, star, the members of a group direct message, and who else has the room open now.
 
-**Composing.** A plain-text composer, with photos, videos and files attached from the photo library or the Files app. Staged files show above the field and can be removed before sending. Uploads show progress. A message that fails to send can be retried or discarded. Editing reuses the composer and changes only the part of the body you touched, so formatting elsewhere in the message is kept.
+**Messages.** Long-press a message to react with a quick emoji, reply in a thread, choose another reaction or type your own, copy it, select its text, edit it or delete it. Edit and delete are offered only where Ember allows them, and delete asks first. Reactions (Ember's boosts) show as chips under the message. Tap a chip to see who reacted and to remove your own, or tap + to add one. An edit, delete or reaction that fails shows under the message with Retry. Long messages fold behind Show more.
+
+**Composing.** A plain-text composer, with photos, videos and files attached from the photo library or the Files app. Type @ to mention someone: suggestions show each person's avatar, so two people with the same name can be told apart. Staged files show above the field and can be removed before sending. Uploads show progress. A message that fails to send can be retried or discarded. Drafts are kept for each room and thread until you send or clear them, across launches. Editing reuses the composer and changes only the part of the body you touched, so formatting elsewhere in the message is kept.
 
 **Threads.** A thread shows the parent and its replies. The reply composer can also send the reply to the room, or to the direct message. In the room, a thread shows a summary with faces, a reply count and the time of the latest reply.
 
-**Message bodies.** Paragraphs, headings, code blocks, quotes, lists, tables, rules, link previews and mentions are drawn natively. Emoji-only messages are shown large. Images are shown inline at their stored proportions. Videos show a poster and open in the system player. Other files show as a row and open when tapped. A tapped link opens only if it is http, https, `mailto` or `tel`.
+**Message bodies.** Paragraphs, headings, code blocks, quotes, lists, tables, rules, link previews and mentions are drawn natively. Emoji-only messages are shown large. Images are shown inline at their stored proportions, and animated GIFs play unless Reduce Motion is on. A picture that fails to load can be retried. Videos show a poster and play full screen. Images and other files open in Quick Look. A tapped link to a room, message or thread on the same server opens in the app. Other links open only if they are http, https, `mailto` or `tel`.
 
-**Bot cards.** Ember's card attachments: colour bar, author, title, fields, sections, buttons, tables, context rows, images, tiles, footers and "Show more" for long text.
+**Bot cards.** Ember's card attachments, square-cornered and tinted: colour bar, author, title, fields, sections, buttons, tables, context rows, images, tiles, footers and "Show more" for long text.
 
 **Search.** Search messages, with filters for room, person, mentions of you, links, files and threads, sorted newest or oldest first. Matched words are highlighted and recent searches are kept. Tapping a result opens the room or thread at that message.
+
+**Connection.** When the device is offline, a crossed-out Wi-Fi symbol shows on Home and in the room's title. A spinner shows while the app reconnects.
+
+**Signing out.** Signing out, or a session the server ends, removes what the app kept for that account: drafts, unsent messages, downloaded messages, files and pictures, and the room and people lists.
+
+**Accessibility.** Layouts change at the largest text sizes. VoiceOver reads unread counts and offers a message's actions. Colours are checked for contrast. Reduce Motion is respected.
 
 ## Not there yet
 
 Compared with Ember's web client:
 
-- A rich-text composer (bold, lists, code) and @mention autocomplete. The composer sends plain text.
+- A rich-text composer (bold, lists, code). The composer sends plain text and mentions.
 - Quote and Copy link in the message menu.
-- Presence: who is in a room now.
+- Presence in the room lists, and the member list of a shared room.
 - Inline video playback.
 - Creating rooms, and room settings.
 - Profiles and the people list.
@@ -64,7 +72,7 @@ Compared with Ember's web client:
 
 ## Getting it running
 
-You need Xcode 26, because the app targets iOS 26. You also need [XcodeGen](https://github.com/yonaskolb/XcodeGen).
+The app runs on iOS 18 and later. It uses iOS 26 features where they exist, so you need Xcode 26 to build it. You also need [XcodeGen](https://github.com/yonaskolb/XcodeGen).
 
 ```bash
 brew install xcodegen
@@ -118,7 +126,9 @@ On start-up the server prints the address it is listening on and the administrat
 
 ## Pointing it at a real Ember server
 
-Enter the server's address on the first screen. `https://` is assumed unless the host is local, so `chat.example.com` is enough. To switch servers later, sign out and tap Change next to the server on the sign-in screen.
+Enter the server's address on the first screen. `https://` is assumed unless the host is local, so `chat.example.com` is enough. To use another server as well, choose Add Account in the account menu. To change the server before signing in, tap Change next to it on the sign-in screen.
+
+To fill a server of your own with test data, `Tools/big-seed` adds a made-up company of 50 people with rooms, threads, files and bot cards, and can remove them again. [Tools/big-seed/README.md](Tools/big-seed/README.md) explains how to run it.
 
 ## Running on a device
 
@@ -145,12 +155,12 @@ xcodebuild test -project Ember.xcodeproj -scheme Ember -destination 'platform=iO
 
 ## How it is put together
 
-The app is SwiftUI, written in Swift 6 with strict concurrency. The SDK does the networking and keeps the state: `Workspace` for the sidebar, `RoomSession` and `ThreadSession` for what is on screen. The app observes those stores and draws them. `SessionController` tracks whether you are choosing a server, signing in or signed in, and closes and reopens the sockets as the app moves between background and foreground.
+The app is SwiftUI, written in Swift 6 with strict concurrency. The SDK does the networking and keeps the state: `Workspace` for the sidebar, `RoomSession` and `ThreadSession` for what is on screen. The app observes those stores and draws them. `Accounts` holds one slot per account, each with its own `SessionController` and `AccountStores`. `SessionController` tracks whether you are choosing a server, signing in, signed in or unable to reach the server. The sockets close when the app goes to the background and reopen when it comes back.
 
-- `Ember/App`: the entry point, the root view and the session controller.
+- `Ember/App`: the entry point, the root view, accounts, the session controller, network status, server links and where you were.
 - `Ember/Auth`: choosing a server and signing in.
 - `Ember/Rooms`: the Home and Activity tabs, the account menu and new direct messages.
-- `Ember/Room`: the timeline, messages, attachments, cards, rich text, the composer and threads.
+- `Ember/Room`: the timeline, messages, reactions, attachments, pictures, video, cards, rich text, the composer, mentions, drafts, room details and threads.
 - `Ember/Search`: search and its filters.
 - `Ember/Support`: avatars, appearance and shared pieces.
 

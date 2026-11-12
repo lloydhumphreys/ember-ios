@@ -17,15 +17,34 @@ struct StagedFile: Identifiable {
     var name: String { source.name }
 }
 
-/// What a composer has staged, and the picks still being copied for it. It's the composer's state,
-/// so it goes when the composer does (leaving the room, popping the thread, signing out), and its
-/// copies go with it: picks still being copied are cancelled, and files never sent are deleted.
+/// What a composer has staged, and the picks still being copied for it, kept in the order they
+/// were picked however long each takes. A few are copied at a time and the rest wait their turn,
+/// so a big pick doesn't read every file at once. It's kept for its room or thread while the app
+/// runs (`Drafts`), and when it goes its copies go with it: picks still being copied are
+/// cancelled, and files never sent are deleted.
 @MainActor @Observable final class StagedFiles {
     private(set) var files: [StagedFile] = []
-    /// How many picks are still being copied or measured.
+    /// How many picks are still waiting, being copied or measured.
     private(set) var copying = 0
 
+    /// How many picks are copied at once.
+    @ObservationIgnored let concurrentCopies: Int
     @ObservationIgnored private var tasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var waiting: [Pick] = []
+    /// Each file's place in the order picked, by its id.
+    @ObservationIgnored private var places: [UUID: Int] = [:]
+    @ObservationIgnored private var nextPlace = 0
+
+    private struct Pick {
+        let key = UUID()
+        let place: Int
+        let copy: @Sendable () async throws -> URL?
+        let refuse: @MainActor (any Error) -> Void
+    }
+
+    init(concurrentCopies: Int = 3) {
+        self.concurrentCopies = max(1, concurrentCopies)
+    }
 
     isolated deinit {
         for task in tasks.values { task.cancel() }
@@ -33,26 +52,52 @@ struct StagedFile: Identifiable {
     }
 
     func append(_ file: StagedFile) {
-        files.append(file)
+        insert(file, at: takePlace())
     }
 
     func remove(_ file: StagedFile) {
         files.removeAll { $0.id == file.id }
+        places[file.id] = nil
         Staging.discard(file.source.fileURL)
     }
 
     /// Everything staged, handed to Send: the SDK deletes each file from here on.
     func takeAll() -> [StagedFile] {
-        defer { files = [] }
+        defer {
+            files = []
+            places = [:]
+        }
         return files
     }
 
-    /// Stages the copy `copy` makes (nil for none), off the main actor. `refuse` hears why one
-    /// couldn't be, unless these files have gone meanwhile, when there's no screen to say it on and
-    /// the copy is deleted instead.
+    /// Stages the copy `copy` makes (nil for none), off the main actor, in its place after every
+    /// pick before it. `refuse` hears why one couldn't be, unless these files have gone meanwhile,
+    /// when there's no screen to say it on and the copy is deleted instead.
     func stage(_ copy: @escaping @Sendable () async throws -> URL?, refuse: @escaping @MainActor (any Error) -> Void) {
-        let key = UUID()
         copying += 1
+        waiting.append(Pick(place: takePlace(), copy: copy, refuse: refuse))
+        startWaiting()
+    }
+
+    private func takePlace() -> Int {
+        defer { nextPlace += 1 }
+        return nextPlace
+    }
+
+    private func insert(_ file: StagedFile, at place: Int) {
+        places[file.id] = place
+        let index = files.firstIndex { (places[$0.id] ?? .max) > place } ?? files.endIndex
+        files.insert(file, at: index)
+    }
+
+    private func startWaiting() {
+        while tasks.count < concurrentCopies, !waiting.isEmpty {
+            start(waiting.removeFirst())
+        }
+    }
+
+    private func start(_ pick: Pick) {
+        let key = pick.key, place = pick.place, copy = pick.copy, refuse = pick.refuse
         tasks[key] = Task { [weak self] in
             defer { self?.finish(key) }
             do {
@@ -62,7 +107,7 @@ struct StagedFile: Identifiable {
                 guard self != nil, !Task.isCancelled else { return Staging.discard(url) }
                 let (source, preview) = try await Self.background { try await Staging.stage(url) }
                 guard let self, !Task.isCancelled else { return Staging.discard(source.fileURL) }
-                files.append(StagedFile(source: source, thumbnail: preview.flatMap(UIImage.init(data:))))
+                insert(StagedFile(source: source, thumbnail: preview.flatMap(UIImage.init(data:))), at: place)
             } catch is CancellationError {
                 // Gone with the composer; `copied` has left nothing behind.
             } catch {
@@ -74,6 +119,7 @@ struct StagedFile: Identifiable {
     private func finish(_ key: UUID) {
         tasks[key] = nil
         copying -= 1
+        startWaiting()
     }
 
     /// Runs `work` off the main actor, cancelled along with the task waiting on it.
@@ -112,17 +158,32 @@ enum Staging {
 
     /// Copies `url` into a folder of its own under `uploads`, keeping its name. It's a URL the
     /// photo picker lends only for now, or one outside the sandbox (the Files picker's, which
-    /// `isScoped` says to ask for). A file over `Limits.fileBytes` is refused before any of it is
-    /// copied when its size can be read, and once copied when it can't. Nothing is left behind
-    /// when it fails or the task is cancelled.
+    /// `isScoped` says to ask for). One outside the sandbox is read through a file coordinator, so
+    /// a file in iCloud Drive or another provider's is downloaded first and isn't read while
+    /// it's being written. A file over `Limits.fileBytes` is refused before any of it is copied
+    /// when its size can be read, and once copied when it can't. Nothing is left behind when it
+    /// fails or the task is cancelled.
     static func copied(_ url: URL, isScoped: Bool, into uploads: URL = uploadsFolder) throws -> URL {
         try Task.checkCancellation()
         let scoped = isScoped && url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard isScoped else { return try copiedNow(url, into: uploads) }
+        var coordinationError: NSError?
+        var result: Result<URL, any Error> = .failure(Refusal.unreadable)
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordinationError) { readable in
+            result = Result { try copiedNow(readable, named: url.lastPathComponent, into: uploads) }
+        }
+        if coordinationError != nil { throw Refusal.unreadable }
+        return try result.get()
+    }
+
+    /// `copied`'s work once the file can be read: `name` is what the copy is called.
+    private static func copiedNow(_ url: URL, named name: String? = nil, into uploads: URL) throws -> URL {
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-        guard !isTooLarge(byteSize: size) else { throw Refusal.tooLarge(url.lastPathComponent) }
+        let name = name ?? url.lastPathComponent
+        guard !isTooLarge(byteSize: size) else { throw Refusal.tooLarge(name) }
         let folder = uploads.appending(path: UUID().uuidString, directoryHint: .isDirectory)
-        let copy = folder.appending(path: url.lastPathComponent)
+        let copy = folder.appending(path: name)
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: url, to: copy)
@@ -229,8 +290,8 @@ enum Staging {
 }
 
 /// A photo-library item as a file: copied out of the picker's loan into a staged copy of the
-/// app's own, so a video is never held in memory. The movie comes first, as a Live Photo or video
-/// offers a picture too.
+/// app's own, so a video is never held in memory. The movie comes first, as a video can offer a
+/// picture too; a Live Photo goes as its picture (`PickedStill`).
 struct PickedFile: Transferable {
     let url: URL
 
@@ -238,5 +299,22 @@ struct PickedFile: Transferable {
         FileRepresentation(importedContentType: .movie) { PickedFile(url: try Staging.copied($0.file, isScoped: false)) }
         FileRepresentation(importedContentType: .image) { PickedFile(url: try Staging.copied($0.file, isScoped: false)) }
         FileRepresentation(importedContentType: .item) { PickedFile(url: try Staging.copied($0.file, isScoped: false)) }
+    }
+
+    /// Whether an item offering `types` goes as its picture: a Live Photo, whose movie is only
+    /// the moments around it, or anything with a picture and no movie.
+    static func goesAsPicture(_ types: [UTType]) -> Bool {
+        if types.contains(where: { $0.conforms(to: .livePhoto) || $0.identifier.hasPrefix("com.apple.live-photo") }) { return true }
+        return types.contains { $0.conforms(to: .image) } && !types.contains { $0.conforms(to: .movie) }
+    }
+}
+
+/// A photo-library item's picture as a file, for a Live Photo, which would otherwise come over as
+/// its movie.
+struct PickedStill: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .image) { PickedStill(url: try Staging.copied($0.file, isScoped: false)) }
     }
 }

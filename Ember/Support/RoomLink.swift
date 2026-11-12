@@ -30,5 +30,6 @@ func roomSymbol(for room: Room) -> String {
     case .open: "number"
     case .closed: "lock"
     case .direct: "person"
+    case .unknown: "number"
     }
 }

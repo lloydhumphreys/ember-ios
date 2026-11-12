@@ -17,6 +17,10 @@ enum TimelineItem: Identifiable {
     }
 
     static func pendingID(_ clientMessageId: String) -> String { "pending-\(clientMessageId)" }
+
+    /// Whether `id` is a day's heading, which belongs to the day rather than a message: an older
+    /// page from the same day takes it to its own top.
+    static func isDay(_ id: String) -> Bool { id.hasPrefix("day-") }
 }
 
 /// Lays out a timeline the way the web does: a message from the same person within five minutes
@@ -38,36 +42,64 @@ enum TimelineLayout {
         messages: [Message], pending: [PendingMessage], me: UserID?, in place: Place = .room, calendar: Calendar = .current
     ) -> [TimelineItem] {
         var items: [TimelineItem] = []
-        var previous: (creator: UserID, at: Date, deleted: Bool)?
-
-        func startsDay(_ date: Date) -> Bool {
-            guard let previous else { return place == .room }
-            return !calendar.isDate(previous.at, inSameDayAs: date)
-        }
-
-        func quotes(_ parentID: String?) -> Bool {
-            place == .room && parentID != nil
-        }
-
+        var previous: Previous?
         for message in messages {
-            let newDay = startsDay(message.createdAt)
-            if newDay { items.append(.day(calendar.startOfDay(for: message.createdAt))) }
-            let grouped = !newDay && !quotes(message.parentId)
-                && follows(previous, creator: message.creator.id, at: message.createdAt, deleted: message.isDeleted)
-            items.append(.message(message, grouped: grouped))
-            previous = (message.creator.id, message.createdAt, message.isDeleted)
+            items += rows(for: message, after: previous, in: place, calendar: calendar)
+            previous = Previous(message)
+        }
+        return items + rows(for: pending, after: previous, me: me, in: place, calendar: calendar)
+    }
+
+    /// What a message's rows depend on of the message before it.
+    struct Previous: Equatable {
+        var creator: UserID
+        var at: Date
+        var deleted: Bool
+
+        init(creator: UserID, at: Date, deleted: Bool) {
+            self.creator = creator
+            self.at = at
+            self.deleted = deleted
         }
 
-        // Pending messages are always this person's, and go after everything the room has confirmed.
+        init(_ message: Message) {
+            self.init(creator: message.creator.id, at: message.createdAt, deleted: message.isDeleted)
+        }
+    }
+
+    /// A message's rows: a day's heading when it starts one, and the message itself.
+    static func rows(for message: Message, after previous: Previous?, in place: Place, calendar: Calendar) -> [TimelineItem] {
+        let newDay = startsDay(message.createdAt, after: previous, in: place, calendar: calendar)
+        let grouped = !newDay && !quotes(message.parentId, in: place)
+            && follows(previous, creator: message.creator.id, at: message.createdAt, deleted: message.isDeleted)
+        let row = TimelineItem.message(message, grouped: grouped)
+        return newDay ? [.day(calendar.startOfDay(for: message.createdAt)), row] : [row]
+    }
+
+    /// The rows of the messages on their way, which are always this person's, and go after
+    /// everything the room has confirmed.
+    static func rows(for pending: [PendingMessage], after previous: Previous?, me: UserID?, in place: Place, calendar: Calendar) -> [TimelineItem] {
+        var items: [TimelineItem] = []
+        var previous = previous
         for message in pending {
-            let newDay = startsDay(message.createdAt)
+            let newDay = startsDay(message.createdAt, after: previous, in: place, calendar: calendar)
             if newDay { items.append(.day(calendar.startOfDay(for: message.createdAt))) }
-            let grouped = !newDay && !quotes(message.parentId)
+            let grouped = !newDay && !quotes(message.parentId, in: place)
                 && me.map { follows(previous, creator: $0, at: message.createdAt, deleted: false) } == true
             items.append(.pending(message, grouped: grouped))
-            previous = (me ?? "", message.createdAt, false)
+            previous = Previous(creator: me ?? "", at: message.createdAt, deleted: false)
         }
         return items
+    }
+
+    private static func startsDay(_ date: Date, after previous: Previous?, in place: Place, calendar: Calendar) -> Bool {
+        guard let previous else { return place == .room }
+        return !calendar.isDate(previous.at, inSameDayAs: date)
+    }
+
+    /// A room quotes what a reply also sent there answers, so it always shows its header.
+    private static func quotes(_ parentID: String?, in place: Place) -> Bool {
+        place == .room && parentID != nil
     }
 
     /// What the divider under a thread's parent counts: the parent's own summary, or the replies
@@ -77,9 +109,92 @@ enum TimelineLayout {
         return count > 0 ? count : nil
     }
 
-    private static func follows(_ previous: (creator: UserID, at: Date, deleted: Bool)?, creator: UserID, at date: Date, deleted: Bool) -> Bool {
+    private static func follows(_ previous: Previous?, creator: UserID, at date: Date, deleted: Bool) -> Bool {
         guard let previous, !previous.deleted, !deleted else { return false }
         return previous.creator == creator && abs(date.timeIntervalSince(previous.at)) <= groupingWindow
+    }
+}
+
+/// A timeline's rows kept between layouts, so a change lays out only what it touched. The same
+/// messages give back the rows already made; otherwise each message reuses its rows when it, and
+/// what it depends on of the message before it, are as they were, which leaves the walk itself and
+/// the messages that changed, with the one after each. The messages on their way are few, and are
+/// laid out each time.
+@MainActor
+final class TimelineLayoutCache {
+    private struct Segment {
+        var message: Message
+        var previous: TimelineLayout.Previous?
+        var rows: [TimelineItem]
+    }
+
+    private var messages: [Message]?
+    private var pending: [PendingMessage] = []
+    private var me: UserID?
+    private var items: [TimelineItem] = []
+    private var segments: [String: Segment] = [:]
+    /// Where each row's id falls in `items`, worked out the first time it's asked for after a
+    /// layout.
+    private var positions: [String: Int]?
+    private let place: TimelineLayout.Place
+    /// The calendar days are told apart in: the device's own, which follows its time zone, so
+    /// the next layout after the zone changes draws the days again.
+    var calendar: Calendar
+    private var timeZone: TimeZone?
+
+    init(in place: TimelineLayout.Place = .room, calendar: Calendar = .autoupdatingCurrent) {
+        self.place = place
+        self.calendar = calendar
+    }
+
+    /// How many messages the latest layout laid out afresh.
+    private(set) var laidOut = 0
+
+    /// The same rows as `TimelineLayout.items`.
+    func items(messages: [Message], pending: [PendingMessage], me: UserID?) -> [TimelineItem] {
+        laidOut = 0
+        if calendar.timeZone != timeZone {
+            timeZone = calendar.timeZone
+            self.messages = nil
+            self.segments = [:]
+        }
+        if messages == self.messages, pending == self.pending, me == self.me { return items }
+        var items: [TimelineItem] = []
+        items.reserveCapacity(messages.count + messages.count / 8)
+        var segments: [String: Segment] = [:]
+        segments.reserveCapacity(messages.count)
+        var previous: TimelineLayout.Previous?
+        for message in messages {
+            let rows: [TimelineItem]
+            if let cached = self.segments[message.id], cached.previous == previous, cached.message == message {
+                rows = cached.rows
+            } else {
+                rows = TimelineLayout.rows(for: message, after: previous, in: place, calendar: calendar)
+                laidOut += 1
+            }
+            segments[message.id] = Segment(message: message, previous: previous, rows: rows)
+            items += rows
+            previous = TimelineLayout.Previous(message)
+        }
+        items += TimelineLayout.rows(for: pending, after: previous, me: me, in: place, calendar: calendar)
+        self.messages = messages
+        self.pending = pending
+        self.me = me
+        self.items = items
+        self.segments = segments
+        positions = nil
+        return items
+    }
+
+    /// Where the row `id` falls among the latest layout's rows, top first; nil for one it doesn't
+    /// have.
+    func position(of id: String) -> Int? {
+        if let positions { return positions[id] }
+        var positions: [String: Int] = [:]
+        positions.reserveCapacity(items.count)
+        for (index, item) in items.enumerated() { positions[item.id] = index }
+        self.positions = positions
+        return positions[id]
     }
 }
 

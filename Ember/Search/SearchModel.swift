@@ -13,6 +13,13 @@ final class SearchModel {
         case failed(String)
     }
 
+    /// Where the next page of the shown results is, once they are shown.
+    enum More: Equatable {
+        case idle
+        case loading
+        case failed(String)
+    }
+
     var text = ""
     var roomID: RoomID?
     var fromID: UserID?
@@ -24,18 +31,27 @@ final class SearchModel {
 
     private(set) var phase: Phase = .idle
     private(set) var matches: [SearchMatch] = []
+    /// Each shown match's text with its words emphasised, worked out once as its page arrives.
+    private(set) var highlighted: [SearchMatch.ID: AttributedString] = [:]
     private(set) var rooms: [RoomID: Room] = [:]
     private(set) var next: Int?
     private(set) var recent: [SearchQuery] = []
-    private(set) var isLoadingMore = false
-    private(set) var moreFailure: String?
+    private(set) var more = More.idle
+
+    var isLoadingMore: Bool { more == .loading }
+
+    var moreFailure: String? {
+        if case .failed(let message) = more { message } else { nil }
+    }
 
     private var client: EmberClient?
     private var task: Task<Void, Never>?
     /// Bumped by every new search, so an answer that arrives late can tell it's out of date.
     private var generation = 0
     /// The query the shown results are for, which is what a further page continues.
-    private var shownQuery: SearchQuery?
+    private(set) var shownQuery: SearchQuery?
+    /// The order the shown results are in, which a further page keeps.
+    private var shownSort = SearchSort.newest
 
     var query: SearchQuery {
         SearchQuery(
@@ -67,22 +83,28 @@ final class SearchModel {
         let generation = generation
         let query = query
         guard let client, query.isSearchable else {
-            reset()
+            if query.q.isEmpty {
+                reset()
+            } else {
+                showNothing(for: query)
+            }
             return
         }
         phase = .searching
-        isLoadingMore = false
-        moreFailure = nil
+        more = .idle
         let sort = sort
         task = Task { [weak self] in
             do {
                 let results = try await client.search(query, sort: sort, record: record)
+                let highlighted = await SearchHighlight.attributed(results.matches)
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
                 self.matches = results.matches
+                self.highlighted = highlighted
                 self.rooms = Dictionary(results.rooms.map { ($0.id, $0) }, uniquingKeysWith: { $1 })
                 self.next = results.next
                 self.recent = results.recent
                 self.shownQuery = query
+                self.shownSort = sort
                 self.phase = .loaded
             } catch {
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
@@ -106,25 +128,37 @@ final class SearchModel {
     /// The next page, when the last row has appeared.
     func loadMore() {
         guard let client, let cursor = next, let query = shownQuery, phase == .loaded, !isLoadingMore else { return }
-        isLoadingMore = true
-        moreFailure = nil
+        more = .loading
         let generation = generation
-        let sort = sort
+        let sort = shownSort
         task = Task { [weak self] in
             do {
                 let results = try await client.search(query, sort: sort, cursor: cursor, record: false)
+                let highlighted = await SearchHighlight.attributed(results.matches)
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
                 let known = Set(self.matches.map(\.id))
                 self.matches += results.matches.filter { !known.contains($0.id) }
+                self.highlighted.merge(highlighted) { old, _ in old }
                 for room in results.rooms { self.rooms[room.id] = room }
                 self.next = results.next
-                self.isLoadingMore = false
+                self.more = .idle
             } catch {
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
-                self.moreFailure = error.localizedDescription
-                self.isLoadingMore = false
+                self.more = .failed(error.localizedDescription)
             }
         }
+    }
+
+    /// No results for words the server can't search for, such as emoji or punctuation alone: it
+    /// keeps only letters and digits, so asking it would find everything or fail.
+    private func showNothing(for query: SearchQuery) {
+        phase = .loaded
+        matches = []
+        highlighted = [:]
+        rooms = [:]
+        next = nil
+        shownQuery = query
+        more = .idle
     }
 
     func retry() {
@@ -146,10 +180,10 @@ final class SearchModel {
         generation += 1
         phase = .idle
         matches = []
+        highlighted = [:]
         next = nil
         shownQuery = nil
-        isLoadingMore = false
-        moreFailure = nil
+        more = .idle
     }
 
     func clearRecent() async {

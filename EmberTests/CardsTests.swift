@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import SwiftUI
 import EmberSDK
 import EmberRichText
 import EmberTesting
@@ -154,7 +155,7 @@ import EmberTesting
         format.timeZone = TimeZone(identifier: "UTC")!
         let at = ISO8601DateFormatter().date(from: "2026-10-12T10:00:00Z")!
         let text = CardFooterText.text("Grafana", at: at, format: format)
-        #expect(text.hasPrefix("Grafana · 10/12/2026"))
+        #expect(text.hasPrefix("Grafana · Oct 12, 2026"))
         // Its time reads as the row's: hour and minute, from the same fields.
         var rowFormat = Date.FormatStyle.dateTime.hour().minute()
         rowFormat.locale = format.locale
@@ -162,6 +163,18 @@ import EmberTesting
         #expect(text.hasSuffix(at.formatted(rowFormat)))
         #expect(CardFooterText.text("Grafana", at: nil) == "Grafana")
         #expect(CardFooterText.text(nil, at: nil) == "")
+    }
+
+    /// Its date once read 12/10/2026 where the day goes first, which can't be told from 10 December.
+    @Test(arguments: ["en_US", "en_GB", "en_AU", "de_DE"])
+    func aFooterNamesItsMonthWhereverThePhoneIs(_ identifier: String) {
+        var format = CardFooterText.format
+        format.locale = Locale(identifier: identifier)
+        format.timeZone = TimeZone(identifier: "UTC")!
+        let at = ISO8601DateFormatter().date(from: "2026-10-12T10:00:00Z")!
+        let text = CardFooterText.text(nil, at: at, format: format)
+        #expect(text.localizedStandardContains("Oct") || text.localizedStandardContains("Okt"))
+        #expect(!text.contains("10/12") && !text.contains("12/10") && !text.contains("12.10."))
     }
 
     @Test func foldedTextCutsUnderItsFifthRow() {
@@ -197,6 +210,66 @@ import EmberTesting
         #expect(fold.buttonTitle == "Show less")
         #expect(CardFold(isLong: false).buttonTitle == nil)
         #expect(CardFold(html: "<p>Short</p>").buttonTitle == nil)
+    }
+
+    // MARK: Tables
+
+    @Test func eachRowAfterTheFirstReadsAsItsHeadersAndValues() {
+        let rows = [["Host", "Status", ""], ["web-1", "up", "x"], ["web-2", "", "y"]]
+        #expect(CardTableRows.readings(rows) == ["Host, Status", "Host: web-1, Status: up, x", "Host: web-2, y"])
+        #expect(CardTableRows.readings([]) == [])
+        #expect(CardTableRows.readings([["only"]]) == ["only"])
+    }
+
+    @Test func aCellReadsAsItsTextWithoutStyles() {
+        let blocks: [RichBlock] = [
+            .paragraph([.text("Deploy ", [.bold]), .link(url: "/x", [.text("web", [])]), .lineBreak, .mention(userId: "u1")]),
+            .list(ordered: false, start: nil, items: [[.paragraph([.text("a", [])])], [.paragraph([.text("b", [])])]]),
+        ]
+        #expect(CardTableRows.plain(blocks) == "Deploy web a, b")
+    }
+
+    // MARK: Nesting
+
+    @Test func anItemTooDeepToIndentCarriesItsMarkerInItsFirstLine() {
+        let item: [RichBlock] = [.paragraph([.text("deep", [])]), .rule]
+        #expect(RichIndent.marked(item, with: "•") == [.paragraph([.text("• ", []), .text("deep", [])]), .rule])
+        #expect(RichIndent.marked([.rule], with: "3.") == [.paragraph([.text("3. ", [])]), .rule])
+        let inner: [RichBlock] = [.list(ordered: false, start: nil, items: [[.paragraph([.text("x", [])])]])]
+        #expect(RichIndent.marked(inner, with: "•") == inner)
+    }
+
+    /// Text 48 quotes or lists in was once indented off the screen, a letter to a line.
+    @Test(arguments: ["blockquote", "ul"])
+    func textNestedFarInIsNoNarrowerThanAtTheMostItIndents(_ tag: String) throws {
+        let words = String(repeating: "word ", count: 40)
+        func nested(_ levels: Int) -> String {
+            let open = tag == "ul" ? "<ul><li>" : "<blockquote>"
+            let close = tag == "ul" ? "</li></ul>" : "</blockquote>"
+            return String(repeating: open, count: levels) + "<p>\(words)</p>" + String(repeating: close, count: levels)
+        }
+        let atTheMost = try size(nested(RichIndent.maxLevels + 1))
+        let far = try size(nested(48))
+        #expect(far.width <= 390)
+        #expect(far.height == atTheMost.height)
+    }
+
+    /// Anyone in a room can send a list numbered from the largest number there is; counting on
+    /// from it mustn't take the app down.
+    @Test func aListNumberedFromTheLargestNumberStillShows() throws {
+        let shown = try size("<ol start=\"\(Int.max)\"><li>a</li><li>b</li></ol>")
+        #expect(shown.height > 0)
+    }
+
+    private static let workspace = Workspace.mock()
+
+    private func size(_ html: String) throws -> CGSize {
+        let view = RichTextView(document: RichText.document(html: html, plainText: "", host: host))
+            .fixedSize(horizontal: false, vertical: true)
+            .environment(Self.workspace)
+        let renderer = ImageRenderer(content: view)
+        renderer.proposedSize = ProposedViewSize(width: 390, height: nil)
+        return try #require(renderer.uiImage).size
     }
 
     @Test func shownCardsDropAddressesTheRuleRefuses() throws {

@@ -109,7 +109,7 @@ enum CardFieldRows {
 /// moment is its date and, as the web's footer has it, its time as the message's own row shows one:
 /// hour and minute, from the same fields, so the two read alike.
 enum CardFooterText {
-    static let format = Date.FormatStyle().year().month(.defaultDigits).day().hour().minute()
+    static let format = Date.FormatStyle().year().month(.abbreviated).day().hour().minute()
 
     static func text(_ text: String?, at: Date?, format: Date.FormatStyle = format) -> String {
         [text, at.map { $0.formatted(format) }].compactMap(\.self).joined(separator: " · ")

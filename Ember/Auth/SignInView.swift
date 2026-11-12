@@ -14,22 +14,29 @@ struct SignInView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var name = ""
-    @State private var isWorking = false
-    @State private var error: String?
+    @State private var submission: Submission
     @FocusState private var field: Field?
 
     private enum Field { case email, password, name }
 
-    init(client: EmberClient, bootstrap: Bootstrap) {
+    /// `reason` is why sign-in is showing, as `SessionController.signOutReason` keeps it.
+    init(client: EmberClient, bootstrap: Bootstrap, reason: SignOutReason?) {
         self.client = client
         self.bootstrap = bootstrap
+        _submission = State(initialValue: Self.signedOutMessage(reason).map(Submission.failed) ?? .idle)
+    }
+
+    /// Why sign-in is showing, where the server ended the session rather than the person asking.
+    /// It shows where a failed sign-in does, and goes the same way.
+    static func signedOutMessage(_ reason: SignOutReason?) -> String? {
+        reason == .sessionEnded ? "Your session ended. Sign in again." : nil
     }
 
     private var isGuest: Bool { bootstrap.guestSignIn }
     private var needsSetup: Bool { bootstrap.setup == .pending }
 
     private var canSubmit: Bool {
-        guard !isWorking, !needsSetup else { return false }
+        guard !submission.isWorking, !needsSetup else { return false }
         if isGuest { return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !password.isEmpty
     }
@@ -110,7 +117,7 @@ struct SignInView: View {
 
             Button(action: submit) {
                 Group {
-                    if isWorking {
+                    if submission.isWorking {
                         ProgressView()
                     } else {
                         Text("Sign In").font(.body.weight(.semibold))
@@ -119,8 +126,16 @@ struct SignInView: View {
                 .frame(maxWidth: .infinity, minHeight: 28)
             }
             .buttonStyle(.borderedProminent)
+            .tint(.accentFill)
             .disabled(!canSubmit)
             .padding(.top, 14)
+
+            if !isGuest, let url = Self.passwordResetURL(client: client, bootstrap: bootstrap, email: email) {
+                Link("Forgot Password?", destination: url)
+                    .font(.footnote)
+                    .disabled(submission.isWorking)
+                    .padding(.top, 12)
+            }
         }
         .textFieldStyle(.plain)
         .padding(.horizontal, 14)
@@ -131,11 +146,16 @@ struct SignInView: View {
 
     /// Correcting what failed is what clears the complaint about it. It's done as the field
     /// writes rather than by watching the string, which a burst of input changes several times
-    /// a frame.
+    /// a frame. A field also writes what it already holds, as when it takes focus: that corrects
+    /// nothing, so it clears nothing.
     private func correcting(_ text: Binding<String>) -> Binding<String> {
         Binding(
             get: { text.wrappedValue },
-            set: { text.wrappedValue = $0; clearError() })
+            set: { new in
+                guard new != text.wrappedValue else { return }
+                text.wrappedValue = new
+                clearError()
+            })
     }
 
     @ViewBuilder
@@ -155,7 +175,7 @@ struct SignInView: View {
 
     private var footer: some View {
         VStack(spacing: 14) {
-            if let error {
+            if let error = submission.failure {
                 Text(error)
                     .font(.footnote)
                     .foregroundStyle(.red)
@@ -167,22 +187,37 @@ struct SignInView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Button("Change") { session.forgetServer() }
-                    .disabled(isWorking)
+                    .disabled(submission.isWorking)
             }
             .font(.footnote)
         }
         .padding(.horizontal, 32)
         .padding(.top, 24)
+        .announcesWhenShown(submission.failure)
+    }
+
+    /// The web page that emails a code to reset a forgotten password, with the address typed so far,
+    /// on a server that can send email; nil on one that can't, which has no such page.
+    static func passwordResetURL(client: EmberClient, bootstrap: Bootstrap, email: String) -> URL? {
+        guard bootstrap.passwordResetCodes, var components = client.url("/passwords/new").flatMap({
+            URLComponents(url: $0, resolvingAgainstBaseURL: false)
+        }) else { return nil }
+        let address = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !address.isEmpty {
+            components.percentEncodedQueryItems = [URLQueryItem(
+                name: "email_address",
+                value: address.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))))]
+        }
+        return components.url
     }
 
     private func clearError() {
-        if error != nil { error = nil }
+        submission.clearFailure()
     }
 
     private func submit() {
         guard canSubmit else { return }
-        isWorking = true
-        error = nil
+        submission.begin()
         let isGuest = isGuest
         Task {
             do {
@@ -192,11 +227,11 @@ struct SignInView: View {
                     try await session.signIn(
                         emailAddress: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password)
                 }
+                submission.finish()
             } catch {
-                self.error = (error as? EmberError)?.message ?? error.localizedDescription
+                submission.fail((error as? EmberError)?.message ?? error.localizedDescription)
                 if !isGuest { field = .password }
             }
-            isWorking = false
         }
     }
 }

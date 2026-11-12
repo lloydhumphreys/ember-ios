@@ -10,10 +10,29 @@ struct RichTextView: View {
     var body: some View {
         if document.isEmojiOnly {
             // As the web shows a message of only emoji: large, and nothing else to style.
-            RichBlocks(blocks: document.blocks, depth: 0)
+            RichBlocks(blocks: document.blocks, depth: 0, indents: 0)
                 .font(.largeTitle)
         } else {
-            RichBlocks(blocks: document.blocks, depth: 0)
+            RichBlocks(blocks: document.blocks, depth: 0, indents: 0)
+        }
+    }
+}
+
+/// How many quotes and lists in, at most, a message's text is indented; deeper ones go no further
+/// in, so text nested any deeper still has the width to be read.
+enum RichIndent {
+    static let maxLevels = 4
+
+    /// An item's blocks with `marker` leading its first paragraph, or on a line of its own above
+    /// them when they don't start with one. An item that starts with a list of its own takes no
+    /// marker, as that list's first item has one, so lists nested many deep don't stack a line of
+    /// markers each.
+    static func marked(_ item: [RichBlock], with marker: String) -> [RichBlock] {
+        let lead = RichInline.text(marker + " ", [])
+        switch item.first {
+        case let .paragraph(inlines): return [.paragraph([lead] + inlines)] + item.dropFirst()
+        case .list: return item
+        default: return [.paragraph([lead])] + item
         }
     }
 }
@@ -22,11 +41,13 @@ private struct RichBlocks: View {
     let blocks: [RichBlock]
     /// How deep in lists this is, which picks the bullet.
     let depth: Int
+    /// How many quotes and lists in this is.
+    let indents: Int
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                RichBlockView(block: block, depth: depth)
+                RichBlockView(block: block, depth: depth, indents: indents)
             }
         }
     }
@@ -35,6 +56,10 @@ private struct RichBlocks: View {
 private struct RichBlockView: View {
     let block: RichBlock
     let depth: Int
+    let indents: Int
+
+    /// Whether this is as far in as text goes.
+    private var isAtMostIndent: Bool { indents >= RichIndent.maxLevels }
 
     @ScaledMetric(relativeTo: .body) private var quoteBar: CGFloat = 3
 
@@ -61,23 +86,34 @@ private struct RichBlockView: View {
             .background(Color(.secondarySystemBackground), in: .rect(cornerRadius: 8))
 
         case .quote(let blocks):
-            HStack(alignment: .top, spacing: 10) {
-                Capsule()
-                    .fill(.tertiary)
-                    .frame(width: quoteBar)
-                RichBlocks(blocks: blocks, depth: depth)
+            if isAtMostIndent {
+                RichBlocks(blocks: blocks, depth: depth, indents: indents + 1)
                     .foregroundStyle(.secondary)
+            } else {
+                HStack(alignment: .top, spacing: 10) {
+                    Capsule()
+                        .fill(.tertiary)
+                        .frame(width: quoteBar)
+                    RichBlocks(blocks: blocks, depth: depth, indents: indents + 1)
+                        .foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .fixedSize(horizontal: false, vertical: true)
 
         case .list(let ordered, let start, let items):
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(items.enumerated()), id: \.offset) { index, item in
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(ordered ? "\((start ?? 1) + index)." : Self.bullet(depth))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                        RichBlocks(blocks: item, depth: depth + 1)
+                    let marker = ordered ? "\((start ?? 1) &+ index)." : Self.bullet(depth)
+                    if isAtMostIndent {
+                        // The marker in the item's first line instead of beside it.
+                        RichBlocks(blocks: RichIndent.marked(item, with: marker), depth: depth + 1, indents: indents + 1)
+                    } else {
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(marker)
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                            RichBlocks(blocks: item, depth: depth + 1, indents: indents + 1)
+                        }
                     }
                 }
             }
@@ -140,6 +176,55 @@ struct InlineText: View {
     }
 }
 
+/// Places a long address or other unbroken run may wrap without the text system cutting a word
+/// with a hyphen: after the marks an address divides at, and every `run` characters between them.
+enum TextBreaks {
+    static let run = 10
+    /// Words shorter than this are left alone.
+    static let minimum = 24
+    static let opportunity: Character = "\u{200B}"
+
+    static func breakable(_ string: String) -> String {
+        guard string.count >= minimum else { return string }
+        var result = ""
+        result.reserveCapacity(string.utf8.count + string.utf8.count / 8)
+        var word = ""
+        for character in string {
+            if character.isWhitespace {
+                result += broken(word)
+                result.append(character)
+                word = ""
+            } else {
+                word.append(character)
+            }
+        }
+        result += broken(word)
+        return result
+    }
+
+    private static func broken(_ word: String) -> String {
+        guard word.count >= minimum else { return word }
+        let characters = Array(word)
+        var result = ""
+        var unbroken = 0
+        for (index, character) in characters.enumerated() {
+            result.append(character)
+            unbroken += 1
+            guard index + 1 < characters.count else { break }
+            // After a run of marks, as "://", rather than inside it.
+            if (isMark(character) && !isMark(characters[index + 1])) || unbroken >= run {
+                result.append(opportunity)
+                unbroken = 0
+            }
+        }
+        return result
+    }
+
+    private static func isMark(_ character: Character) -> Bool {
+        "/?&=#.-_~:+,;@".contains(character)
+    }
+}
+
 @MainActor private struct InlineBuilder {
     let workspace: Workspace
 
@@ -178,7 +263,7 @@ struct InlineText: View {
         for inline in inlines {
             switch inline {
             case .text(let string, let style):
-                var run = AttributedString(string)
+                var run = AttributedString(TextBreaks.breakable(string))
                 apply(style, to: &run)
                 if let link { run.link = link }
                 pieces.run += run
@@ -240,10 +325,10 @@ private struct LinkPreviewCard: View {
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 if let image = preview.image {
-                    RemoteImage(path: image, points: imageSize)
+                    RemoteImage(path: image, points: imageSize, retries: false)
                         .frame(width: preview.isAvatar ? imageSize * 0.7 : imageSize,
                                height: preview.isAvatar ? imageSize * 0.7 : imageSize)
-                        .clipShape(preview.isAvatar ? AnyShape(Circle()) : AnyShape(.rect(cornerRadius: 6)))
+                        .clipShape(preview.isAvatar ? AnyShape(AvatarView.shape(imageSize * 0.7)) : AnyShape(.rect(cornerRadius: 6)))
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text(preview.title)

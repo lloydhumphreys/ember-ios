@@ -8,29 +8,16 @@ struct RoomsView: View {
     @Binding var path: NavigationPath
 
     @Environment(Workspace.self) private var workspace
-    @State private var isComposing = false
+    @Environment(NetworkStatus.self) private var network
     /// Who's suggested whose DM is starting, so another tap doesn't start it
     /// again.
     @State private var startingWith: UserID?
     @State private var startError: String?
 
     var body: some View {
-        Group {
-            if workspace.isLoaded {
-                list
-            } else {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
+        SidebarGate { list }
         .navigationTitle(workspace.account.name)
         .toolbar { toolbar }
-        .sheet(isPresented: $isComposing) {
-            NewDirectView { roomID in
-                isComposing = false
-                path.append(RoomLink(roomID: roomID))
-            }
-        }
         .alert(
             "Couldn’t Start the Conversation",
             isPresented: Binding(get: { startError != nil }, set: { if !$0 { startError = nil } })
@@ -47,12 +34,15 @@ struct RoomsView: View {
         let suggested = workspace.suggestedPeople
         return List {
             if !shared.isEmpty {
-                Section("Rooms") {
+                Section {
                     ForEach(shared) { RoomRowLink(room: $0) }
+                } header: {
+                    PinnedSectionHeader("Rooms")
                 }
+                .listSectionSeparator(.hidden, edges: .top)
             }
             if !directs.isEmpty || !suggested.isEmpty {
-                Section("Direct Messages") {
+                Section {
                     ForEach(directs) { RoomRowLink(room: $0) }
                     ForEach(suggested) { person in
                         SuggestionRow(person: person, isStarting: startingWith == person.id) {
@@ -60,10 +50,14 @@ struct RoomsView: View {
                         }
                         .disabled(startingWith != nil)
                     }
+                } header: {
+                    PinnedSectionHeader("Direct Messages")
                 }
+                .listSectionSeparator(.hidden, edges: .top)
             }
         }
         .listStyle(.plain)
+        .clearsFloatingNewMessage()
         // Over the list rather than in it, with hit-testing off, so pull to
         // refresh still works through it.
         .overlay {
@@ -77,19 +71,11 @@ struct RoomsView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        if workspace.connection != .open {
+        if ConnectionIndicator.isShown(workspace: workspace, network: network) {
             ToolbarItem(placement: .topBarLeading) {
                 ConnectionIndicator()
             }
         }
-        ToolbarItem(placement: .topBarTrailing) {
-            Button {
-                isComposing = true
-            } label: {
-                Label("New Message", systemImage: "square.and.pencil")
-            }
-        }
-        ToolbarSpacer(.fixed, placement: .topBarTrailing)
         ToolbarItem(placement: .topBarTrailing) {
             AccountMenu()
         }
@@ -110,12 +96,27 @@ struct RoomsView: View {
     }
 }
 
-/// The quiet sign that the workspace's socket isn't open: a spinner where
-/// the navigation bar's leading edge is otherwise empty.
+/// The quiet sign that the workspace's socket isn't open, where the navigation
+/// bar's leading edge is otherwise empty: a crossed-out Wi-Fi symbol while the
+/// device is offline, and a spinner while it's online and connecting.
 struct ConnectionIndicator: View {
+    @Environment(NetworkStatus.self) private var network
+
     var body: some View {
-        ProgressView()
-            .controlSize(.small)
-            .accessibilityLabel("Connecting")
+        if network.isOnline {
+            ProgressView()
+                .controlSize(.small)
+                .accessibilityLabel("Connecting")
+        } else {
+            Image(systemName: "wifi.slash")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Offline")
+        }
+    }
+
+    /// Not while nothing has loaded and the list shows a failure with Retry instead (`SidebarPhase`).
+    @MainActor static func isShown(workspace: Workspace, network: NetworkStatus) -> Bool {
+        guard SidebarPhase(workspace) != .failed else { return false }
+        return !network.isOnline || workspace.connection != .open
     }
 }

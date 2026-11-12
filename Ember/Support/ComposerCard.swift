@@ -11,6 +11,11 @@ struct ComposerCard<Content: View>: View {
 
     private let shape = RoundedRectangle(cornerRadius: 24, style: .continuous)
 
+    /// With Increase Contrast the card's edge is drawn as a separator is, in both appearances: the
+    /// glass's own rim, and the faint light-mode edge, are too slight to find it by. (With Reduce
+    /// Transparency the system's glass and material are already opaque, so nothing changes for it.)
+    @Environment(\.colorSchemeContrast) private var contrast
+
     init(margin: CGFloat = 12, @ViewBuilder content: () -> Content) {
         self.margin = margin
         self.content = content()
@@ -21,7 +26,10 @@ struct ComposerCard<Content: View>: View {
             .background(Color.composerFrost)
             .containerShape(shape)
             .clipShape(shape)
-            .glassEffect(.regular, in: shape)
+            .glassBackground(in: shape)
+            .overlay(shape.strokeBorder(
+                contrast == .increased ? Color(.separator) : Color.composerEdge,
+                lineWidth: contrast == .increased ? 1 : 0.5))
             .padding(.horizontal, margin)
             .padding(.bottom, 8)
     }
@@ -46,7 +54,8 @@ struct SendGlyph: View {
                 .symbolRenderingMode(.palette)
                 .foregroundStyle(
                     isEnabled ? AnyShapeStyle(.white) : AnyShapeStyle(Color.secondary.opacity(0.35)),
-                    isEnabled ? AnyShapeStyle(.tint) : AnyShapeStyle(Color.secondary.opacity(0.35)))
+                    // The fill white reads on, not the accent text is drawn in, which is lighter in dark mode.
+                    isEnabled ? AnyShapeStyle(Color.accentFill) : AnyShapeStyle(Color.secondary.opacity(0.35)))
                 .contentTransition(.symbolEffect(.replace))
                 .animation(.snappy, value: isEnabled)
                 .opacity(isBusy ? 0 : 1)
@@ -66,5 +75,15 @@ extension Color {
         traits.userInterfaceStyle == .dark
             ? UIColor.black.withAlphaComponent(0.22)
             : UIColor.white.withAlphaComponent(0.4)
+    })
+}
+
+extension Color {
+    /// Round the composer's glass in light mode, where over light messages the glass alone has no
+    /// edge to see. The dark glass has one of its own.
+    static let composerEdge = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor.clear
+            : UIColor.black.withAlphaComponent(0.12)
     })
 }

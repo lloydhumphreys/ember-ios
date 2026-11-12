@@ -76,6 +76,76 @@ import EmberTesting
         #expect(MessageEdit.editedText(" Hi", from: "Hi") == nil)
     }
 
+    // MARK: Mentions
+
+    private let bo = "1abcdefghijklmno"
+
+    private func stored(_ id: String) -> String {
+        "<action-text-attachment content-type=\"application/vnd.campfire.mention\" sgid=\"\(id)\"></action-text-attachment>"
+    }
+
+    @Test func someoneChosenWhileEditingIsMentionedAndTheRestIsKept() throws {
+        let typed = Draft(text: edit.text + " cc @B")
+        let query = try #require(edit.mentionQuery(in: typed))
+        #expect(query.text == "B")
+        let chosen = query.choosing(bo, name: "Bo", in: typed)
+        #expect(chosen.draft == Draft(text: edit.text + " cc @Bo ", mentions: [bo: "Bo"]))
+        #expect(edit.canSave(chosen.draft))
+        let saved = try #require(edit.body(for: chosen.draft))
+        #expect(saved == body.replacing("today.</p>", with: "today. cc \(stored(bo))</p>"))
+    }
+
+    @Test func someoneChosenMidwayGoesInPlaceWithoutASecondSpace() throws {
+        let text = edit.text.replacing("today.", with: "and @B today.")
+        let caret = try #require(text.range(of: "@B")).upperBound
+        let typed = Draft(text: text)
+        let chosen = try #require(edit.mentionQuery(in: typed, caret: caret)).choosing(bo, name: "Bo", in: typed)
+        #expect(chosen.draft.text == edit.text.replacing("today.", with: "and @Bo today."))
+        #expect(chosen.draft.text[..<chosen.caret].hasSuffix("@Bo "))
+        let saved = try #require(edit.body(for: chosen.draft))
+        #expect(saved == body.replacing("\(mention) today", with: "\(mention) and \(stored(bo)) today"))
+    }
+
+    @Test func startingAnEditSuggestsNobodyUntilItChanges() {
+        let mentioning = MessageEdit(message("<p>Thanks \(mention)</p>", mentions: [sam]))
+        #expect(mentioning.text == "Thanks @Sam")
+        #expect(mentioning.mentionQuery(in: Draft(text: mentioning.text)) == nil)
+        let plain = MessageEdit(message("<p>Ask @Bo</p>"))
+        #expect(plain.mentionQuery(in: Draft(text: plain.text)) == nil)
+        #expect(plain.mentionQuery(in: Draft(text: "Ask @Bo or @A"))?.text == "A")
+    }
+
+    @Test func theMessagesOwnMentionsAreNotAskedAbout() {
+        let mentioning = MessageEdit(message("<p>Thanks \(mention)</p>", mentions: [sam]))
+        #expect(mentioning.mentionQuery(in: Draft(text: "Thanks @Sam!")) == nil)
+        #expect(mentioning.mentionQuery(in: Draft(text: "Thanks @Sam, and")) == nil)
+        #expect(mentioning.mentionQuery(in: Draft(text: "Thanks @Sammy"))?.text == "Sammy")
+    }
+
+    @Test func choosingSomeoneOverTheirNameInPlainTextSavesTheirMention() throws {
+        let plain = MessageEdit(message("<p>Ask @Bo</p>"))
+        let typed = Draft(text: "Ask @B")
+        let chosen = try #require(plain.mentionQuery(in: typed)).choosing(bo, name: "Bo", in: typed)
+        #expect(chosen.draft.text == "Ask @Bo ")
+        // The same text as the message has, but not the same body.
+        #expect(MessageEdit.editedText(chosen.draft.text, from: plain.text) == nil)
+        #expect(plain.canSave(chosen.draft))
+        #expect(plain.body(for: chosen.draft) == "<p>Ask \(stored(bo))</p>")
+    }
+
+    @Test func someoneChosenAndDeletedAgainGoesAsText() throws {
+        let deleted = Draft(text: edit.text + " cc @B", mentions: [bo: "Bo"])
+        let saved = try #require(edit.body(for: deleted))
+        #expect(saved == body.replacing("today.</p>", with: "today. cc @B</p>"))
+        #expect(!edit.canSave(Draft(text: edit.text, mentions: [bo: "Bo"])))
+    }
+
+    @Test func choosingSomeoneTheMessageAlreadyMentionsChangesNothing() {
+        let again = Draft(text: edit.text, mentions: [sam.id: "Sam Rivera"])
+        #expect(!edit.canSave(again))
+        #expect(edit.body(for: again) == nil)
+    }
+
     @Test func aFileOnlyMessageStartsEmptyAndTakesACaption() throws {
         var file = message("")
         let object: [String: Any] = [
