@@ -1,8 +1,8 @@
 import SwiftUI
 import EmberSDK
 
-/// Edit room, for whoever can change it: its name, Open or Closed, and a closed room's members,
-/// ticked as they are, then Save. Saving it closed without you takes you out of it, which asks first.
+/// Edit room, for whoever can change it: its name, whether it's private, and a private room's members,
+/// ticked as they are, then Save. Saving it private without you takes you out of it, which asks first.
 struct RoomEditView: View {
     let roomID: RoomID
     let settings: RoomSettings

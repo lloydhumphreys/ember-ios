@@ -1,8 +1,8 @@
 import SwiftUI
 import EmberSDK
 
-/// The fields New Room and Edit Room share: the name, Open or Closed, and for a closed room who's in
-/// it, picked on a screen of their own.
+/// The fields New Room and Edit Room share: the name, a Private Room switch, and for a private room
+/// (the server's "closed") who's in it, picked on a screen of their own.
 struct RoomFormSections: View {
     @Binding var draft: RoomDraft
     /// Who a closed room can have in it, or nil while they load.
@@ -30,17 +30,8 @@ struct RoomFormSections: View {
                 }
         }
         Section {
-            Picker("Access", selection: $draft.isClosed) {
-                Text("Open").tag(false)
-                Text("Closed").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .listRowInsets(EdgeInsets())
-            .listRowBackground(Color.clear)
-        }
-        if draft.isClosed {
-            Section {
+            Toggle("Private Room", isOn: $draft.isClosed.animation())
+            if draft.isClosed {
                 membersRow
             }
         }

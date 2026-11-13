@@ -130,7 +130,10 @@ struct RoomComposer: View {
                                 attachMenu
                                     .padding(.bottom, 2)
                                 field
-                                if let thread { alsoSendToggle(thread) }
+                                if let thread {
+                                    alsoSendToggle(thread)
+                                        .padding(.bottom, 2)
+                                }
                                 sendButton
                                     .padding(.bottom, 2)
                             }
@@ -141,7 +144,9 @@ struct RoomComposer: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.top, isCompact ? 6 : 8)
-                    .padding(.bottom, isCompact ? 8 : 12)
+                    // Less than at the sides: the buttons' own row already holds a few points
+                    // under their glyphs.
+                    .padding(.bottom, 8)
                     .focusesOnTap { isFocused = true }
                 }
             }
@@ -377,6 +382,9 @@ struct RoomComposer: View {
             .toggleStyle(CheckToggleStyle())
             .font(.footnote)
             .lineLimit(1)
+            // Its 44pt tap height pulled back as the buttons' is, so a thread's row is no taller
+            // than a room's.
+            .padding(.vertical, -8)
             // The web's checkbox goes grey while the socket's down, as a reply can't go then; and
             // an edit has nowhere else to go.
             .disabled(editing != nil || room.status != .open)

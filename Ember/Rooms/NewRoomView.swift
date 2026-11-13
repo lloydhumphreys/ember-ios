@@ -1,7 +1,7 @@
 import SwiftUI
 import EmberSDK
 
-/// New room: its name, Open or Closed, and for a closed room who's in it besides you, then Create,
+/// New room: its name, whether it's private, and for a private room who's in it besides you, then Create,
 /// which makes it and opens it.
 struct NewRoomView: View {
     /// Called with the room once it's made.
