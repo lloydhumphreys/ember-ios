@@ -102,7 +102,8 @@ import EmberSDK
     @ObservationIgnored private let makeClient: @MainActor (URL, HTTPCookieStorage) -> EmberClient
     @ObservationIgnored private let folders: @MainActor (String) -> AccountStores.Folders?
     @ObservationIgnored private let legacyFolders: AccountStores.Folders?
-    @ObservationIgnored private let unsent: any UnsentMessageStore
+    /// Unsent messages of accounts signed out of, still to be removed.
+    @ObservationIgnored let unsentRemovals: UnsentRemovals
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let putOnScreen: @MainActor (AccountStores) -> Void
     @ObservationIgnored private var hasStarted = false
@@ -133,10 +134,14 @@ import EmberSDK
         self.makeClient = makeClient
         self.folders = folders
         self.legacyFolders = legacyFolders
-        self.unsent = unsent ?? FileUnsentMessageStore()
+        unsentRemovals = UnsentRemovals(unsent: unsent ?? FileUnsentMessageStore.shared, defaults: defaults)
         self.network = network ?? NetworkStatus()
         self.clock = clock
         self.putOnScreen = putOnScreen
+        unsentRemovals.isSignedIn = { [weak self] owed in
+            let account = SessionController.SignedInAccount(origin: owed.server, userID: owed.userID)
+            return self?.allSlots.contains { $0.session.storedAccount == account } ?? false
+        }
     }
 
     /// Once, from RootView's `.task`: brings an account signed in before the app held more than one
@@ -154,6 +159,8 @@ import EmberSDK
             saveList()
         }
         sweep()
+        // Once the accounts are known, so none signed in now loses what it left unsent.
+        unsentRemovals.retry()
         let id = defaults.string(forKey: Self.currentKey)
         show(slots.first { $0.id == id } ?? slots[0])
     }
@@ -217,6 +224,9 @@ import EmberSDK
 
     // MARK: Private
 
+    /// Every account, with the one being added.
+    private var allSlots: [Slot] { slots + (adding.map { [$0] } ?? []) }
+
     private func makeSlot(_ id: String) -> Slot {
         let cookies = makeCookies(id)
         let stores = AccountStores(folders: folders(id))
@@ -227,7 +237,7 @@ import EmberSDK
             keys: .account(id),
             network: network,
             clock: clock,
-            leftOnDevice: .standard(stores: stores, unsent: unsent))
+            leftOnDevice: .standard(stores: stores, removals: unsentRemovals))
         let profile = defaults.data(forKey: Self.profileKey(id)).flatMap { try? JSONDecoder().decode(Profile.self, from: $0) }
         let slot = Slot(id: id, session: session, cookies: cookies, stores: stores, profile: profile)
         session.onSignedIn = { [weak self, weak slot] workspace in
@@ -256,6 +266,7 @@ import EmberSDK
     /// what that person left. Otherwise the account being added joins the list and comes on screen.
     private func signedIn(_ slot: Slot, _ workspace: Workspace) {
         let who = SessionController.SignedInAccount(origin: workspace.client.origin, userID: workspace.me.id)
+        unsentRemovals.signedIn(server: who.origin, userID: who.userID)
         if let existing = slots.first(where: { $0 !== slot && $0.signedIn == who }) {
             if adding === slot { adding = nil } else { remove(slot) }
             if existing.workspace == nil {

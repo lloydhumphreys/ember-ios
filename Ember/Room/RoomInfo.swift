@@ -1,32 +1,28 @@
 import SwiftUI
 import EmberSDK
 
-/// The room's title in its bar, which opens the room's details.
-struct RoomInfoButton<Label: View>: View {
-    let roomID: RoomID
-    let present: [User]
-    @ViewBuilder let label: Label
-
-    @State private var isShowing = false
-
-    var body: some View {
-        Button { isShowing = true } label: { label }
-            .buttonStyle(.plain)
-            .sheet(isPresented: $isShowing) {
-                RoomInfoView(roomID: roomID, present: present)
-            }
-    }
-}
-
 /// A room's details: its mark and name, how much of it reaches you, whether it's starred, and who's
-/// in it: for a group DM its members, for a shared room whoever else has it open.
+/// in it: for a group DM its members, for a closed room its members, for a shared room whoever else
+/// has it open. Whoever can change a shared room edits or deletes it here.
 struct RoomInfoView: View {
     let roomID: RoomID
     /// Who has the room open now, as its socket last said.
     let present: [User]
+    /// Called as soon as Edit Room saves the room without you in it, while its sheet is still up.
+    var onLeaving: () -> Void = {}
+    /// Called once the room is deleted, or saved without you in it and Edit Room is down.
+    var onLeft: () -> Void = {}
 
     @Environment(Workspace.self) private var workspace
     @Environment(\.dismiss) private var dismiss
+    /// A shared room's settings, once loaded: who's in it, and whether you can change it.
+    @State private var settings: RoomSettings?
+    @State private var isEditing = false
+    /// Set when Edit Room saved the room without you, so the room is left once its sheet is down.
+    @State private var leftWhileEditing = false
+    @State private var isConfirmingDelete = false
+    @State private var isDeleting = false
+    @State private var deleteError: String?
     @ScaledMetric(relativeTo: .title) private var markSize: CGFloat = 72
     @ScaledMetric(relativeTo: .body) private var faceSize: CGFloat = 32
 
@@ -40,13 +36,76 @@ struct RoomInfoView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: PersonChoice.self) { PersonView(userID: $0.userID) }
             .toolbar {
+                if canAdminister {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Edit") { isEditing = true }
+                            .disabled(isDeleting)
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
+            .sheet(isPresented: $isEditing, onDismiss: {
+                guard leftWhileEditing else { return }
+                leftWhileEditing = false
+                onLeft()
+            }) {
+                if let settings {
+                    RoomEditView(roomID: roomID, settings: settings) { left in
+                        if left {
+                            leftWhileEditing = true
+                            onLeaving()
+                        } else {
+                            Task { await loadSettings() }
+                        }
+                        isEditing = false
+                    }
+                }
+            }
+            .alert(
+                "Couldn’t Delete the Room",
+                isPresented: Binding(get: { deleteError != nil }, set: { if !$0 { deleteError = nil } })
+            ) {
+                Button("OK") { deleteError = nil }
+            } message: {
+                Text(deleteError ?? "")
+            }
         }
+        // Message on someone's screen closes Room Info, so their DM opens on the tab, not behind it.
+        .environment(\.dismissesSheet, dismiss)
         .presentationDetents([.medium, .large])
+        .task(id: roomID) { await loadSettings() }
+    }
+
+    /// Whether you can change or delete the room, as its settings say. Never for a DM.
+    private var canAdminister: Bool {
+        guard let settings, !settings.room.isDirect else { return false }
+        return settings.canAdminister && workspace.room(roomID) != nil
+    }
+
+    /// A shared room's settings. A DM has none to load.
+    private func loadSettings() async {
+        guard let room = workspace.room(roomID)?.room, !room.isDirect else { return }
+        if let loaded = try? await workspace.client.roomSettings(roomID) {
+            settings = loaded
+        }
+    }
+
+    private func delete() {
+        guard !isDeleting else { return }
+        isDeleting = true
+        Task {
+            defer { isDeleting = false }
+            do {
+                try await workspace.deleteRoom(roomID)
+                onLeft()
+            } catch {
+                deleteError = error.localizedDescription
+            }
+        }
     }
 
     private func details(_ sidebarRoom: SidebarRoom) -> some View {
@@ -82,7 +141,6 @@ struct RoomInfoView: View {
                     ForEach(others) { person in row(person) }
                 }
             }
-            // The SDK has no list of a shared room's members, but knows who has it open.
             if !room.isDirect {
                 let here = Self.othersHere(present, me: workspace.me.id) { workspace.name(of: $0) }
                 if !here.isEmpty {
@@ -91,14 +149,49 @@ struct RoomInfoView: View {
                     }
                 }
             }
+            // An open room has everyone in it, so only a closed room lists its members.
+            if room.kind == .closed, let settings {
+                let members = Self.members(settings)
+                if !members.isEmpty {
+                    Section("Members") {
+                        ForEach(members) { person in row(person) }
+                    }
+                }
+            }
+            if canAdminister {
+                Section {
+                    Button("Delete Room", role: .destructive) { isConfirmingDelete = true }
+                        .disabled(isDeleting)
+                        .deleteConfirmation("Delete this room and all its messages?", isPresented: $isConfirmingDelete) {
+                            delete()
+                        }
+                }
+            }
         }
     }
 
+    /// A closed room's members, as its settings list them.
+    static func members(_ settings: RoomSettings) -> [User] {
+        settings.people.filter(\.member).map(\.user)
+    }
+
+    /// Someone in the room, opening their screen. Someone banned is dimmed under a prohibition mark,
+    /// and VoiceOver says they're banned.
     private func row(_ person: User) -> some View {
-        HStack(spacing: 12) {
-            AvatarView(userID: person.id, name: workspace.name(of: person), size: faceSize)
-            Text(workspace.name(of: person))
+        let isBanned = Self.isBanned(person.id, people: workspace.people)
+        return NavigationLink(value: PersonChoice(userID: person.id)) {
+            HStack(spacing: 12) {
+                AvatarView(userID: person.id, name: workspace.name(of: person), size: faceSize)
+                    .bannedMark(isBanned, size: faceSize)
+                Text(workspace.name(of: person))
+            }
         }
+        .accessibilityValue(isBanned ? "Banned" : "")
+    }
+
+    /// Whether the directory has someone as banned. Someone it doesn't have isn't.
+    static func isBanned(_ id: UserID, people: [UserID: DirectoryUser]) -> Bool {
+        people[id]?.status == .banned
     }
 
     /// Everyone in `present` but you, once each, by name.

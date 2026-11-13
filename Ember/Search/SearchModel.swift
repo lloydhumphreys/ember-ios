@@ -54,10 +54,14 @@ final class SearchModel {
     private var shownSort = SearchSort.newest
 
     var query: SearchQuery {
-        SearchQuery(
-            q: text.trimmingCharacters(in: .whitespacesAndNewlines),
-            roomID: roomID, from: fromID, withMe: withMe, hasLink: hasLink, hasFile: hasFile, inThread: inThread
-        )
+        var query = SearchQuery(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        query.roomID = roomID
+        query.from = fromID
+        query.withMe = withMe
+        query.hasLink = hasLink
+        query.hasFile = hasFile
+        query.inThread = inThread
+        return query
     }
 
     var hasFilters: Bool {
@@ -71,13 +75,13 @@ final class SearchModel {
     /// Fetches the recent searches: a search with no words or filters is all they are.
     func loadRecent() async {
         guard let client, phase == .idle else { return }
-        if let results = try? await client.search(SearchQuery(q: "")), phase == .idle {
+        if let results = try? await client.search(SearchQuery()), phase == .idle {
             recent = results.recent
         }
     }
 
-    /// Runs the search the field and filters describe. `record` is true when someone typed it.
-    func run(record: Bool) {
+    /// Runs the search the field and filters describe. `history` is `.record` when someone typed it.
+    func run(history: SearchHistory) {
         task?.cancel()
         generation += 1
         let generation = generation
@@ -95,7 +99,7 @@ final class SearchModel {
         let sort = sort
         task = Task { [weak self] in
             do {
-                let results = try await client.search(query, sort: sort, record: record)
+                let results = try await client.search(query, sort: sort, history: history)
                 let highlighted = await SearchHighlight.attributed(results.matches)
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
                 self.matches = results.matches
@@ -122,7 +126,7 @@ final class SearchModel {
         hasLink = recent.hasLink
         hasFile = recent.hasFile
         inThread = recent.inThread
-        run(record: true)
+        run(history: .record)
     }
 
     /// The next page, when the last row has appeared.
@@ -133,7 +137,7 @@ final class SearchModel {
         let sort = shownSort
         task = Task { [weak self] in
             do {
-                let results = try await client.search(query, sort: sort, cursor: cursor, record: false)
+                let results = try await client.search(query, sort: sort, cursor: cursor)
                 let highlighted = await SearchHighlight.attributed(results.matches)
                 guard let self, generation == self.generation, !Task.isCancelled else { return }
                 let known = Set(self.matches.map(\.id))
@@ -162,7 +166,7 @@ final class SearchModel {
     }
 
     func retry() {
-        run(record: false)
+        run(history: .skip)
     }
 
     func clearFilters() {

@@ -241,7 +241,7 @@ enum TimelineScroll {
     /// How many of `messages` came from others after `lastSeen`, the newest message when the
     /// reader left the end: what the jump-down button counts while the newest are loaded. Zero
     /// when nothing was seen, or it's no longer loaded.
-    static func unseen(in messages: [Message], after lastSeen: String?, me: UserID?) -> Int {
+    static func unseen(in messages: [Message], after lastSeen: MessageID?, me: UserID?) -> Int {
         guard let lastSeen, let index = messages.lastIndex(where: { $0.id == lastSeen }) else { return 0 }
         return messages[(index + 1)...].count { $0.creator.id != me }
     }

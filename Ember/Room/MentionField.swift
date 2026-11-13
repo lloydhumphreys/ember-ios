@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import EmberRichText
+import EmberSDK
 
 /// The composer's field: it grows with what's written up to `lines` lines and then scrolls, shows
 /// each mention in the accent colour, and takes a mention away whole when a Backspace would leave
@@ -11,7 +12,7 @@ struct MentionField: View {
     @Binding var selection: TextSelection?
     @Binding var isFocused: Bool
     /// Who the text can mention, by id, each with the name written after "@".
-    let mentions: [String: String]
+    let mentions: [UserID: String]
     let lines: Int
 
     var body: some View {
@@ -32,7 +33,7 @@ struct MentionField: View {
 
     /// What a deletion of `range` in `text` takes instead: the whole of the mention it falls inside
     /// and is shorter than, or nil to leave it as it is.
-    static func wholeMention(deleting range: NSRange, in text: String, mentions: [String: String]) -> NSRange? {
+    static func wholeMention(deleting range: NSRange, in text: String, mentions: [UserID: String]) -> NSRange? {
         guard range.length > 0 else { return nil }
         for mention in RichText.mentionRanges(in: text, mentions: mentions) {
             let whole = NSRange(mention, in: text)
@@ -93,7 +94,7 @@ private struct MentionTextView: UIViewRepresentable {
     @Binding var text: String
     @Binding var selection: TextSelection?
     @Binding var isFocused: Bool
-    let mentions: [String: String]
+    let mentions: [UserID: String]
     let lines: Int
     let label: String
 

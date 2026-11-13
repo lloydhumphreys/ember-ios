@@ -42,7 +42,7 @@ import EmberTesting
 
     private func staged(_ name: String, bytes: Int = 4, thumbnail: UIImage? = UIImage(systemName: "photo")) throws -> StagedFile {
         let copy = try Staging.copied(try file(name, bytes: bytes), isScoped: false, into: uploads)
-        let source = try UploadSource(fileURL: copy, contentType: "image/jpeg", isTemporary: true)
+        let source = try UploadSource.temporary(fileURL: copy, contentType: "image/jpeg")
         return StagedFile(source: source, thumbnail: thumbnail)
     }
 
@@ -61,7 +61,7 @@ import EmberTesting
         files.append(file)
         let draft = Draft(text: String(repeating: "a", count: Limits.message + 1))
         #expect(throws: EmberError.self) {
-            try RoomComposer.send(draft, staged: files, room: room, thread: nil, alsoSend: false)
+            try RoomComposer.send(draft, staged: files, room: room, thread: nil, delivery: .threadOnly)
         }
         #expect(files.files.map(\.id) == [file.id])
         #expect(exists(file.source.fileURL))

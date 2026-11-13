@@ -22,7 +22,8 @@ struct HomeView: View {
     /// What a launch reopened, until the sidebar says whether the room is still yours.
     @State private var restored: HomePlace?
     @State private var hasRestored = false
-    @State private var isComposing = false
+    /// The New Message or New Room sheet, while one is up.
+    @State private var composing: Composing?
 
     private let places: HomePlaces
 
@@ -61,11 +62,12 @@ struct HomeView: View {
         // The tab bar shrinks out of the way while a list scrolls down and
         // comes back on the way up.
         .minimizesTabBarOnScrollDown()
-        .sheet(isPresented: $isComposing) {
-            NewDirectView { roomID in
-                isComposing = false
-                tab = .home
-                homePath.append(RoomLink(roomID: roomID))
+        .sheet(item: $composing) { composing in
+            switch composing {
+            case .message:
+                NewDirectView(onStarted: open)
+            case .room:
+                NewRoomView(onCreated: open)
             }
         }
         .onAppear(perform: restore)
@@ -79,7 +81,7 @@ struct HomeView: View {
         NavigationStack(path: path) {
             root()
                 .overlay {
-                    NewMessageButton { isComposing = true }
+                    NewMessageButton(newRoom: canCreateRoom ? { composing = .room } : nil) { composing = .message }
                         .padding(.trailing, 16)
                         .padding(.bottom, 12)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -90,6 +92,10 @@ struct HomeView: View {
                 .roomDestination()
         }
         .environment(\.roomShown) { tops[tab] = $0 }
+        .environment(\.returnHome) {
+            path.wrappedValue = NavigationPath()
+            tops[tab] = nil
+        }
         .onChange(of: path.wrappedValue.count) { _, count in
             if count == 0 { tops[tab] = nil }
         }
@@ -97,6 +103,17 @@ struct HomeView: View {
             guard Self.pushes(link, over: tops[tab]) else { return }
             path.wrappedValue.append(link)
         }
+    }
+
+    private var canCreateRoom: Bool {
+        RoomCreation.isOffered(account: workspace.account, me: workspace.me)
+    }
+
+    /// Opens a DM or room just started or made, on Home.
+    private func open(_ roomID: RoomID) {
+        composing = nil
+        tab = .home
+        homePath.append(RoomLink(roomID: roomID))
     }
 
     /// Whether a tapped link pushes onto a stack with `top` showing. A link to the room or thread
@@ -151,6 +168,13 @@ struct HomeView: View {
         case .search: change(&searchPath)
         }
     }
+}
+
+/// What the New button's sheet makes.
+private enum Composing: String, Identifiable {
+    case message, room
+
+    var id: String { rawValue }
 }
 
 extension View {

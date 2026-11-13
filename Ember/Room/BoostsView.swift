@@ -49,7 +49,7 @@ struct BoostsView: View {
     let customBoost: (Message) -> Void
     /// Whether the screen shows the boost with this id gone, so a removal that failed to answer
     /// made it.
-    var showsRemoved: (String) -> Bool = { _ in false }
+    var showsRemoved: (BoostID) -> Bool = { _ in false }
 
     @Environment(Workspace.self) private var workspace
     @ScaledMetric(relativeTo: .footnote) private var chipHeight: CGFloat = 28

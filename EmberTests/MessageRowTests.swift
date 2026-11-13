@@ -16,7 +16,7 @@ import EmberTesting
 
     // MARK: Boosts
 
-    private func boost(_ id: String, _ content: String, by user: User, minute: Int = 0) -> Boost {
+    private func boost(_ id: BoostID, _ content: String, by user: User, minute: Int = 0) -> Boost {
         Boost(id: id, messageId: "m1", booster: user, content: content,
               createdAt: Date(timeIntervalSince1970: 1_000_000 + Double(minute) * 60))
     }

@@ -30,11 +30,11 @@ import EmberRichText
     }
 
     func document(for message: Message, host: String) -> RichDocument {
-        document(key: "\(host)|\(message.id)|\(message.updatedAt.timeIntervalSince1970)", html: message.body, plainText: message.plainText, host: host)
+        document(key: "\(host)|\(message.id.rawValue)|\(message.updatedAt.timeIntervalSince1970)", html: message.body, plainText: message.plainText, host: host)
     }
 
     func document(for pending: PendingMessage, host: String) -> RichDocument {
-        document(key: "\(host)|pending|\(pending.clientMessageId)", html: pending.body, plainText: pending.plainText, host: host)
+        document(key: "\(host)|pending|\(pending.clientMessageId.rawValue)", html: pending.body, plainText: pending.plainText, host: host)
     }
 
     private func document(key: String, html: String, plainText: String, host: String) -> RichDocument {
@@ -63,7 +63,7 @@ import EmberRichText
     /// the card address rule, once per version of the message. Empty when there are none to draw.
     func cards(for message: Message, host: String) -> [Card] {
         guard let cards = message.cards, !cards.isEmpty else { return [] }
-        let key = "\(host)|\(message.id)|\(message.updatedAt.timeIntervalSince1970)|\(cards.count)" as NSString
+        let key = "\(host)|\(message.id.rawValue)|\(message.updatedAt.timeIntervalSince1970)|\(cards.count)" as NSString
         if let box = shownCards.object(forKey: key) { return box.cards }
         let shown = Self.shownCards(cards, host: host)
         shownCards.setObject(CardsBox(shown), forKey: key)
@@ -120,7 +120,7 @@ import EmberRichText
     /// Where `file` is saved: a folder of its own, so two files of one name don't meet.
     func location(of file: StoredFile) -> URL {
         directory
-            .appending(path: Self.safe(file.id, otherwise: "file"), directoryHint: .isDirectory)
+            .appending(path: Self.safe(file.id.rawValue, otherwise: "file"), directoryHint: .isDirectory)
             .appending(path: Self.safe(file.name, otherwise: "file"))
     }
 
@@ -132,7 +132,7 @@ import EmberRichText
             try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: destination.deletingLastPathComponent().path)
             return destination
         }
-        if let task = inFlight[file.id] { return try await task.value }
+        if let task = inFlight[file.id.rawValue] { return try await task.value }
         let request = try Self.request(for: file, client: client)
         let session = session
         let origin = client.origin
@@ -141,9 +141,9 @@ import EmberRichText
             self.trim(keeping: saved)
             return saved
         }
-        inFlight[file.id] = task
+        inFlight[file.id.rawValue] = task
         // Only this download's own entry: after a reset, a newer one for the file may be there.
-        defer { if inFlight[file.id] == task { inFlight[file.id] = nil } }
+        defer { if inFlight[file.id.rawValue] == task { inFlight[file.id.rawValue] = nil } }
         return try await task.value
     }
 

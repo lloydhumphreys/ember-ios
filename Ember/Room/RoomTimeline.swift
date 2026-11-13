@@ -18,7 +18,7 @@ struct RoomTimeline: View {
     /// bottom anchor takes hold (when the offset is still 0) doesn't read as reaching the top.
     @State private var hasSettled = false
     /// The message a link arrived at, lit up for a moment once it's scrolled to.
-    @State private var highlightedID: String?
+    @State private var highlightedID: MessageID?
     /// The jump to latest asked for a fresh page; scroll down once it's here.
     @State private var isAwaitingLatest = false
     /// Goes up to (re)start the wait after which paging may begin. Kept apart from the anchor's
@@ -27,13 +27,13 @@ struct RoomTimeline: View {
     @State private var settleRequest = 0
     /// The message a jump is landing on, and where its row is in the visible region (nil while
     /// the lazy stack hasn't built it), which tells the landing when it's in view.
-    @State private var landingID: String?
+    @State private var landingID: MessageID?
     @State private var landingFrame: CGRect?
     /// Whether the page at each end may be asked for (see `PagingGate`).
     @State private var olderGate = PagingGate()
     @State private var newerGate = PagingGate()
     /// The newest message when the reader left the bottom, which the jump-down button counts from.
-    @State private var lastSeenID: String?
+    @State private var lastSeenID: MessageID?
     @State private var tracker = TimelineTracker()
     @State private var layout = TimelineLayoutCache()
     /// The last fold this timeline has stopped holding its offset for (see `TimelineScroll.holdsFold`).
@@ -146,15 +146,16 @@ struct RoomTimeline: View {
             .onChange(of: MessageFolds.shared.raising) { _, raise in
                 guard let raise, raise.place == .room else { return }
                 guard timeline.message(raise.messageID) != nil else { return MessageFolds.shared.dropped(raise) }
-                tracker.raise(raise.messageID, proxy) { MessageFolds.shared.raised(raise) }
+                tracker.raise(TimelineItem.rowID(raise.messageID), proxy) { MessageFolds.shared.raised(raise) }
             }
             .task(id: MessageFolds.shared.lastToggle?.serial) {
                 guard let serial = MessageFolds.shared.lastToggle?.serial, serial != settledFold else { return }
                 do { try await Task.sleep(for: TimelineScroll.foldHold) } catch { return }
                 settledFold = serial
             }
-            .onChange(of: timeline.messages.first?.id) { oldFirst, _ in
+            .onChange(of: timeline.messages.first?.id) { oldFirstID, _ in
                 guard !tracker.isPinnedToEnd, !isJumpUnsettled else { return }
+                let oldFirst = oldFirstID.map(TimelineItem.rowID)
                 let start = oldFirst.flatMap(layout.position(of:)) ?? 0
                 guard let top = TimelineScroll.topmost(tracker.visibleIDs, position: layout.position(of:), from: start)
                     ?? oldFirst ?? tracker.topID else { return }
@@ -415,7 +416,7 @@ struct RoomTimeline: View {
         defer { landingID = nil }
         let tracker = tracker
         tracker.cancelMoves()
-        await JumpLander.on(anchor, proxy, frame: { landingFrame }, viewport: { tracker.viewportHeight }).show(
+        await JumpLander.on(TimelineItem.rowID(anchor), proxy, frame: { landingFrame }, viewport: { tracker.viewportHeight }).show(
             highlight: { highlightedID = anchor },
             shown: settleAfterJump)
     }
@@ -535,7 +536,7 @@ struct RoomTimeline: View {
     }
 
     private struct AnchorKey: Equatable {
-        var anchor: String?
+        var anchor: MessageID?
         var isLoaded: Bool
     }
 }

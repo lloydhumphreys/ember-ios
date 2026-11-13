@@ -7,7 +7,7 @@ import EmberSDK
 struct HomePlace: Codable, Equatable {
     var tab: HomeTab
     var roomID: RoomID?
-    var threadID: String?
+    var threadID: MessageID?
 
     init(tab: HomeTab, link: RoomLink? = nil) {
         self.tab = tab
@@ -44,7 +44,7 @@ struct HomePlaces {
 
     /// Who a place belongs to: one person on one server.
     static func account(origin: URL, userID: UserID) -> String {
-        "\(origin.absoluteString)#\(userID)"
+        "\(origin.absoluteString)#\(userID.rawValue)"
     }
 
     /// Nil too for a place that no longer reads, such as one on a tab that's gone.
@@ -65,7 +65,7 @@ struct HomePlaces {
 
     /// Forgets the place of every account on the server at `origin`.
     func forget(origin: URL) {
-        let prefix = key(Self.account(origin: origin, userID: ""))
+        let prefix = key(Self.account(origin: origin, userID: UserID("")))
         for name in defaults.dictionaryRepresentation().keys where name.hasPrefix(prefix) {
             defaults.removeObject(forKey: name)
         }

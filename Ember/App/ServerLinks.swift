@@ -23,11 +23,11 @@ extension RoomLink {
 
         if Self.kindSegments.contains(rest[0]) {
             guard rest.count == 2, Self.isID(rest[1]), rest[1] != "new" else { return nil }
-            self.init(roomID: rest[1])
+            self.init(roomID: RoomID(rest[1]))
             return
         }
-        let roomID = rest[0]
-        guard Self.isID(roomID), roomID != "new" else { return nil }
+        guard Self.isID(rest[0]), rest[0] != "new" else { return nil }
+        let roomID = RoomID(rest[0])
         switch rest.count {
         case 1:
             self.init(roomID: roomID)
@@ -61,8 +61,8 @@ extension RoomLink {
 
     /// A message id from an address, or nil for one that's malformed, which opens the room at its
     /// newest messages instead, as on the web.
-    private static func id(_ text: String) -> String? {
-        isID(text) ? text : nil
+    private static func id(_ text: String) -> MessageID? {
+        isID(text) ? MessageID(text) : nil
     }
 
     private static func sameServer(_ url: URL, _ origin: URL) -> Bool {

@@ -78,10 +78,10 @@ import EmberTesting
 
     // MARK: Mentions
 
-    private let bo = "1abcdefghijklmno"
+    private let bo: UserID = "1abcdefghijklmno"
 
-    private func stored(_ id: String) -> String {
-        "<action-text-attachment content-type=\"application/vnd.campfire.mention\" sgid=\"\(id)\"></action-text-attachment>"
+    private func stored(_ id: UserID) -> String {
+        "<action-text-attachment content-type=\"application/vnd.campfire.mention\" sgid=\"\(id.rawValue)\"></action-text-attachment>"
     }
 
     @Test func someoneChosenWhileEditingIsMentionedAndTheRestIsKept() throws {

@@ -271,7 +271,8 @@ enum TextBreaks {
             case .link(let href, let children):
                 append(children, link: workspace.client.url(href) ?? link, into: &pieces)
 
-            case .mention(let userID):
+            case .mention(let rawUserID):
+                let userID = UserID(rawUserID)
                 let name = workspace.name(ofUserID: userID)
                 var run = AttributedString("@" + (name ?? "…"))
                 if name != nil {

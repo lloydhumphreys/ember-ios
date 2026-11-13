@@ -3,7 +3,8 @@ import UIKit
 import EmberSDK
 
 /// Your avatar in the navigation bar, as a menu of every account on the device with a tick on the
-/// one on screen, adding another, the app's appearance, and signing out of this one.
+/// one on screen, your profile, for administrators Invite People and, while anyone is banned, the
+/// banned, adding another account, the app's appearance, and signing out of this one.
 struct AccountMenu: View {
     @Environment(Workspace.self) private var workspace
     @Environment(Accounts.self) private var accounts
@@ -18,6 +19,8 @@ struct AccountMenu: View {
     /// Signing out asks first: it's a menu item away from the account switcher, and undoing it
     /// means signing in again.
     @State private var isConfirmingSignOut = false
+    /// The sheet a menu item opened: Profile, Invite People or Banned.
+    @State private var sheet: AccountSheet?
 
     /// What VoiceOver says of the account button besides "Account": who's signed in, and with more
     /// than one account on the device, which workspace it's in.
@@ -66,6 +69,27 @@ struct AccountMenu: View {
             }
             Section {
                 Button {
+                    sheet = .profile
+                } label: {
+                    Label("Profile", systemImage: "person.crop.circle")
+                }
+                if workspace.me.administrator {
+                    Button {
+                        sheet = .invite
+                    } label: {
+                        Label("Invite People", systemImage: "person.badge.plus")
+                    }
+                    if !workspace.bannedPeople.isEmpty {
+                        Button {
+                            sheet = .banned
+                        } label: {
+                            Label("Banned", systemImage: "nosign")
+                        }
+                    }
+                }
+            }
+            Section {
+                Button {
                     accounts.beginAdding()
                 } label: {
                     Label("Add Account", systemImage: "plus")
@@ -99,6 +123,14 @@ struct AccountMenu: View {
             }
             Button("Cancel", role: .cancel) {}
         }
+        // On the menu too, for the same reason.
+        .sheet(item: $sheet) { sheet in
+            switch sheet {
+            case .profile: ProfileView()
+            case .invite: InvitePeopleView()
+            case .banned: BannedPeopleView()
+            }
+        }
         .task(id: faces.map(\.key)) {
             await load(faces)
         }
@@ -113,6 +145,12 @@ struct AccountMenu: View {
             pictures[face.key] = face.image(picture: picture, scale: displayScale)
         }
     }
+}
+
+/// A sheet the account menu opens.
+enum AccountSheet: String, Identifiable {
+    case profile, invite, banned
+    var id: String { rawValue }
 }
 
 /// One account as the menu shows it: its workspace, who's signed in, and their avatar.

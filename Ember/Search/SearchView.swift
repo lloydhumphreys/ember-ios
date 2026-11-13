@@ -52,7 +52,7 @@ struct SearchView: View {
         .searchable(text: typedText, prompt: "Search")
         .textInputAutocapitalization(.never)
         .autocorrectionDisabled()
-        .onSubmit(of: .search) { model.run(record: true) }
+        .onSubmit(of: .search) { model.run(history: .record) }
         .toolbar { ToolbarItem(placement: .topBarTrailing) { filterMenu } }
         .sheet(item: $picking) { picker in
             switch picker {
@@ -153,7 +153,7 @@ struct SearchView: View {
 
     /// Changing a filter or the sort re-runs the search that's showing, if there is one.
     private func changed() {
-        if model.query.isSearchable { model.run(record: false) } else { model.reset() }
+        if model.query.isSearchable { model.run(history: .skip) } else { model.reset() }
     }
 
     private var roomBinding: Binding<RoomID?> {

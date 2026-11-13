@@ -33,18 +33,31 @@ import EmberTesting
         #expect(lists.peopleBuilds == 2)
     }
 
-    @Test func deactivatedPeopleComeLastAndTheSameNameIsOrderedById() {
+    @Test func deactivatedPeopleComeLastBannedPeopleArentListedAndTheSameNameIsOrderedById() {
         let lists = PickerLists()
         let people = [
             DirectoryUser(id: "user_b", name: "Sam Smith", avatarUrl: "/b"),
             DirectoryUser(id: "user_a", name: "Sam Smith", avatarUrl: "/a"),
             DirectoryUser(id: "user_gone", name: "Aaron Able", status: .deactivated, avatarUrl: "/gone"),
+            DirectoryUser(id: "user_away", name: "Abby Away", status: .suspended, avatarUrl: "/away"),
             DirectoryUser(id: "user_banned", name: "Abe Banned", status: .banned, avatarUrl: "/banned"),
             DirectoryUser(id: "user_zoe", name: "zoë Zed", avatarUrl: "/zoe"),
             DirectoryUser(id: "user_amy", name: "Amy Adams", avatarUrl: "/amy"),
         ]
         let sorted = lists.people(Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0) }))
-        #expect(sorted.map(\.id) == ["user_amy", "user_a", "user_b", "user_zoe", "user_gone", "user_banned"])
+        #expect(sorted.map(\.id) == ["user_amy", "user_a", "user_b", "user_zoe", "user_gone", "user_away"])
+    }
+
+    @Test func someoneBannedLeavesThePersonFilterAndComesBackOnceLetIn() {
+        let lists = PickerLists()
+        var directory = Self.directory(3)
+        let id: UserID = "user_0"
+        #expect(lists.people(directory).contains { $0.id == id })
+        directory[id]?.status = .banned
+        #expect(!lists.people(directory).contains { $0.id == id })
+        #expect(lists.people(directory).count == 2)
+        directory[id]?.status = .active
+        #expect(lists.people(directory).contains { $0.id == id })
     }
 
     @Test func newMessageListsEveryoneActiveButYouAndSortsOnce() {
@@ -103,7 +116,7 @@ import EmberTesting
         model.attach(Self.client(transport))
         for typed in ["🔥", "?!…", "🙂 🙃"] {
             model.text = typed
-            model.run(record: true)
+            model.run(history: .record)
             #expect(model.phase == .loaded)
             #expect(model.matches.isEmpty)
             #expect(model.shownQuery?.q == typed)
@@ -115,9 +128,9 @@ import EmberTesting
         let model = SearchModel()
         model.attach(Self.client(MockHTTPTransport()))
         model.text = "🔥"
-        model.run(record: true)
+        model.run(history: .record)
         model.text = "  "
-        model.run(record: true)
+        model.run(history: .record)
         #expect(model.phase == .idle)
         #expect(model.shownQuery == nil)
     }
@@ -128,7 +141,7 @@ import EmberTesting
         let message = Fixtures.message("m1", "The theme of the day")
         // The fixture leaves out the words the server says matched; these are the ones it would send.
         var answer = try #require(try JSONSerialization.jsonObject(
-            with: Data(Fixtures.searchJSON(search: SearchQuery(q: "the"), matches: [message]).utf8)) as? [String: Any])
+            with: Data(Fixtures.searchJSON(search: SearchQuery("the"), matches: [message]).utf8)) as? [String: Any])
         var matches = try #require(answer["matches"] as? [[String: Any]])
         matches[0]["words"] = ["the"]
         answer["matches"] = matches
@@ -137,7 +150,7 @@ import EmberTesting
         let model = SearchModel()
         model.attach(Self.client(transport))
         model.text = "the"
-        model.run(record: true)
+        model.run(history: .record)
         while model.phase != .loaded { await Task.yield() }
         let highlighted = try #require(model.highlighted[message.id])
         #expect(Self.emphasised(highlighted) == ["The", "the", "the"])
@@ -146,12 +159,12 @@ import EmberTesting
     @Test(.timeLimit(.minutes(1)))
     func aFurtherPageKeepsTheOrderOfTheResultsShown() async throws {
         let transport = MockHTTPTransport()
-        transport.stub("GET", "/api/searches", json: Fixtures.searchJSON(search: SearchQuery(q: "the"), next: 2))
+        transport.stub("GET", "/api/searches", json: Fixtures.searchJSON(search: SearchQuery("the"), next: 2))
         let model = SearchModel()
         model.attach(Self.client(transport))
         model.text = "the"
         model.sort = .oldest
-        model.run(record: false)
+        model.run(history: .skip)
         while model.phase != .loaded { await Task.yield() }
         // The order is changed but not yet searched again: the page shown is still oldest first.
         model.sort = .newest
@@ -317,7 +330,7 @@ import EmberTesting
         let last = ["Lovelace", "Hopper", "Turing", "Ünal", "Johnson", "Torvalds", "Hamilton", "Ritchie", "Liskov", "Thompson"]
         var people: [UserID: DirectoryUser] = [:]
         for index in 0 ..< count {
-            let id = "user_\(index)"
+            let id = UserID("user_\(index)")
             let name = "\(first[index % first.count]) \(last[(index / first.count) % last.count]) \(index)"
             people[id] = DirectoryUser(id: id, name: name, status: index % 50 == 49 ? .deactivated : .active, avatarUrl: "/users/\(index)/avatar")
         }
@@ -325,7 +338,7 @@ import EmberTesting
     }
 
     private static func client(_ transport: some HTTPTransport) -> EmberClient {
-        EmberClient(origin: URL(string: "https://chat.example.com")!, transport: transport, connector: MockSocketConnector(), cookies: EphemeralCookieStorage())
+        EmberClient(origin: URL(string: "https://chat.example.com")!, environment: .mock(transport: transport, cookies: EphemeralCookieStorage()))
     }
 
     /// The emphasised runs of `text`, in order.

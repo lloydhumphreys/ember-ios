@@ -47,7 +47,7 @@ enum MessageFold {
     /// A message folded or unfolded by the reader, for a scroll view that keeps the reader's
     /// place as the row changes height.
     struct Toggle: Equatable {
-        let messageID: String
+        let messageID: MessageID
         let isOpen: Bool
         let serial: Int
         /// Where the row that was tapped is: a room's timeline, or a thread's.
@@ -57,7 +57,7 @@ enum MessageFold {
     /// A fold asked for with the message's top above what's in view (`MessageFold.raisesFirst`):
     /// the timeline at `place` brings the row to the top, then folds it (`raised`).
     struct Raise: Equatable {
-        let messageID: String
+        let messageID: MessageID
         let place: MessagePlace
     }
 
@@ -66,17 +66,17 @@ enum MessageFold {
     private(set) var raising: Raise?
 
     @ObservationIgnored private var lengths: [String: Bool] = [:]
-    @ObservationIgnored private var heights: [String: CGFloat] = [:]
+    @ObservationIgnored private var heights: [MessageID: CGFloat] = [:]
     @ObservationIgnored private var tops: [String: CGFloat] = [:]
 
-    func isOpen(_ messageID: String, in place: MessagePlace = .room) -> Bool {
+    func isOpen(_ messageID: MessageID, in place: MessagePlace = .room) -> Bool {
         open.contains(Self.key(messageID, place))
     }
 
     /// Opens or folds a message in the timeline at `place`. A fold with its text's top above
     /// what's in view waits for the timeline to bring the row to the top (`raising`); asked for
     /// again meanwhile, it waits on.
-    func toggle(_ messageID: String, in place: MessagePlace = .room) {
+    func toggle(_ messageID: MessageID, in place: MessagePlace = .room) {
         if raising?.messageID == messageID { return }
         let key = Self.key(messageID, place)
         if open.contains(key), MessageFold.raisesFirst(top: tops[key]) {
@@ -100,7 +100,7 @@ enum MessageFold {
         raising = nil
     }
 
-    private func flip(_ messageID: String, in place: MessagePlace) {
+    private func flip(_ messageID: MessageID, in place: MessagePlace) {
         let key = Self.key(messageID, place)
         let isOpen = !open.contains(key)
         if isOpen { open.insert(key) } else { open.remove(key) }
@@ -109,18 +109,18 @@ enum MessageFold {
 
     /// Notes how far below the top of the region between the bars a message's text starts, in the
     /// timeline at `place`; nil once it's off screen.
-    func setTop(_ y: CGFloat?, for messageID: String, in place: MessagePlace) {
+    func setTop(_ y: CGFloat?, for messageID: MessageID, in place: MessagePlace) {
         tops[Self.key(messageID, place)] = y
     }
 
     /// A thread's parent is shown in the room too, each with a button and a fold of its own.
-    private static func key(_ messageID: String, _ place: MessagePlace) -> String {
-        "\(place == .room ? "room" : "thread")|\(messageID)"
+    private static func key(_ messageID: MessageID, _ place: MessagePlace) -> String {
+        "\(place == .room ? "room" : "thread")|\(messageID.rawValue)"
     }
 
     /// Whether `message` folds, worked out once for each version of it.
     func isLong(_ message: Message) -> Bool {
-        let key = "\(message.id)|\(message.updatedAt.timeIntervalSince1970)"
+        let key = "\(message.id.rawValue)|\(message.updatedAt.timeIntervalSince1970)"
         if let known = lengths[key] { return known }
         let isLong = MessageFold.isLong(plainText: message.plainText)
         lengths[key] = isLong
@@ -128,9 +128,9 @@ enum MessageFold {
     }
 
     /// Where the fold was last measured to fall in a message's text.
-    func foldHeight(_ messageID: String) -> CGFloat? { heights[messageID] }
+    func foldHeight(_ messageID: MessageID) -> CGFloat? { heights[messageID] }
 
-    func setFoldHeight(_ height: CGFloat?, for messageID: String) {
+    func setFoldHeight(_ height: CGFloat?, for messageID: MessageID) {
         heights[messageID] = height
     }
 

@@ -12,7 +12,7 @@ import EmberSDK
 
     /// `source` is the SDK's, the same the sockets listen to; tests pass EmberTesting's
     /// `MockNetworkPath`.
-    init(source: any NetworkPathSource = SystemNetworkPath()) {
+    init(source: any NetworkPathSource = SystemNetworkPath.shared) {
         let updates = source.availability()
         watching = Task { [weak self] in
             for await online in updates {

@@ -9,11 +9,11 @@ struct DraftKey: Hashable, Sendable {
     let user: UserID
     let room: RoomID
     /// The thread's first message, for a reply; nil for the room itself.
-    var thread: String? = nil
+    var thread: MessageID? = nil
 
     /// The key as it's written to disk.
     var storageKey: String {
-        [server, user, room, thread ?? ""].joined(separator: " ")
+        [server, user.rawValue, room.rawValue, thread?.rawValue ?? ""].joined(separator: " ")
     }
 }
 

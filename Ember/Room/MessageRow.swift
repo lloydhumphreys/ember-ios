@@ -35,6 +35,7 @@ struct MessageRow: View {
 
     @Environment(Workspace.self) private var workspace
     @Environment(\.openURL) private var openURL
+    @Environment(\.personPresenter) private var personPresenter
     @Environment(\.dynamicTypeSize) private var typeSize
     @ScaledMetric(relativeTo: .body) private var scaledAvatar: CGFloat = 36
     @ScaledMetric(relativeTo: .body) private var lineHeight: CGFloat = 22
@@ -102,8 +103,27 @@ struct MessageRow: View {
         }
     }
 
-    private var avatar: some View {
-        AvatarView(userID: message.creator.id, name: workspace.name(of: message.creator), size: avatarSize)
+    /// The author's face, which shows them when tapped, where something can.
+    @ViewBuilder private var avatar: some View {
+        let name = workspace.name(of: message.creator)
+        let face = AvatarView(userID: message.creator.id, name: name, size: avatarSize)
+        if let personPresenter {
+            Button { personPresenter.show(message.creator.id) } label: { face }
+                .buttonStyle(.plain)
+                .accessibilityLabel(name)
+        } else {
+            face
+        }
+    }
+
+    /// The author's name over the message, which shows them when tapped, as the face does.
+    @ViewBuilder private func authorName(_ title: MessageHeaderTitle) -> some View {
+        if let personPresenter {
+            Button { personPresenter.show(message.creator.id) } label: { title }
+                .buttonStyle(.plain)
+        } else {
+            title
+        }
     }
 
     /// A blank square where the face was, as the web leaves a deleted message.
@@ -167,13 +187,13 @@ struct MessageRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .center, spacing: 8) {
                     avatar
-                    title
+                    authorName(title)
                 }
                 timeLine
             }
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                title.layoutPriority(1)
+                authorName(title).layoutPriority(1)
                 timeLine
             }
         }
@@ -265,6 +285,11 @@ struct MessageRow: View {
     }
 
     @ViewBuilder private var accessibilityActions: some View {
+        // At the accessibility sizes the face is inside the message's element, so the message
+        // offers what tapping it does.
+        if isStacked, !grouped, !message.isDeleted, let personPresenter {
+            Button(workspace.name(of: message.creator)) { personPresenter.show(message.creator.id) }
+        }
         if !message.isDeleted {
             let document = DocumentCache.shared.document(for: message, host: host)
             ForEach(Array(MessageSpeech.links(in: document).enumerated()), id: \.offset) { _, link in
@@ -402,7 +427,7 @@ extension EnvironmentValues {
 /// measured from the text's lines as it's laid out, and the measurement is state here, so the row
 /// is laid out again at it before it's drawn rather than drawn at a guess.
 private struct FoldedText: View {
-    let messageID: String
+    let messageID: MessageID
     let document: RichDocument
     /// One line's height, for the fold before the text is measured.
     let fallbackLine: CGFloat
@@ -597,8 +622,8 @@ struct PendingRow: View {
     let grouped: Bool
     let me: User?
     /// The room's or the thread's, whichever sent it.
-    let retry: (String) -> Void
-    let discard: (String) -> Void
+    let retry: (ClientMessageID) -> Void
+    let discard: (ClientMessageID) -> Void
 
     @Environment(Workspace.self) private var workspace
     @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 36

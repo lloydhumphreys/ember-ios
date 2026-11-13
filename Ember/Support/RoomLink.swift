@@ -4,8 +4,8 @@ import EmberSDK
 /// `threadID` it's that thread, opened at `messageID` (one of its replies) if there is one.
 struct RoomLink: Hashable {
     var roomID: RoomID
-    var messageID: String? = nil
-    var threadID: String? = nil
+    var messageID: MessageID? = nil
+    var threadID: MessageID? = nil
 }
 
 extension RoomLink {

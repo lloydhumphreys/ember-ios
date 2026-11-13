@@ -36,7 +36,7 @@ import EmberTesting
         if let stored { defaults.set(stored, forKey: SessionController.originKey) }
         let transport = Redirecting(to: answeredFrom, json: Self.bootstrap(signedIn: false))
         return SessionController(
-            makeClient: { EmberClient(origin: $0, transport: transport, connector: MockSocketConnector(), cookies: EphemeralCookieStorage()) },
+            makeClient: { EmberClient(origin: $0, environment: .mock(transport: transport, cookies: EphemeralCookieStorage())) },
             defaults: defaults, network: NetworkStatus(source: path), clock: clock, leftOnDevice: emptied.stores)
     }
 
@@ -358,8 +358,8 @@ import EmberTesting
         #expect(session.phase.isSignedOut)
         #expect(emptied.everyStoreEmptied(once: origin))
         guard case .signedOut(let client, _) = session.phase else { return }
-        #expect(client.signOutReason == .asked)
-        #expect(session.signOutReason == .asked)
+        #expect(client.signOutReason == .userInitiated)
+        #expect(session.signOutReason == .userInitiated)
         #expect(SignInView.signedOutMessage(session.signOutReason) == nil)
     }
 
@@ -403,7 +403,7 @@ import EmberTesting
     // MARK: Who was signed in
 
     private func remember(_ userID: UserID) {
-        defaults.set(["origin": origin.absoluteString, "userID": userID], forKey: SessionController.accountKey)
+        defaults.set(["origin": origin.absoluteString, "userID": userID.rawValue], forKey: SessionController.accountKey)
     }
 
     @Test func signingInRemembersWhoAndSigningOutForgetsThem() async throws {
@@ -424,6 +424,7 @@ import EmberTesting
             return
         }
         #expect(session.storedAccount == .init(origin: origin, userID: workspace.me.id))
+        #expect(defaults.dictionary(forKey: SessionController.accountKey) as? [String: String] == ["origin": "https://ember.test", "userID": "user_ada"])
 
         signedIn.set(false)
         await session.signOut()
@@ -439,7 +440,7 @@ import EmberTesting
         connector.onConnect { connection in
             guard connection.request.url?.path != "/api/socket" else { return }
             ended.set(true)
-            connection.serverCloses(code: SocketClose.revoked)
+            connection.serverCloses(code: 4003) // revoked: the session is gone
         }
         defaults.set(origin.absoluteString, forKey: SessionController.originKey)
         let client = EmberClient.mock(origin: origin, transport: transport, connector: connector)
@@ -586,7 +587,7 @@ import EmberTesting
         await session.start()
         await session.signOut()
         #expect(session.phase.isSignedOut)
-        #expect(session.signOutReason == .asked)
+        #expect(session.signOutReason == .userInitiated)
         #expect(SignInView.signedOutMessage(session.signOutReason) == nil)
     }
 
@@ -652,19 +653,51 @@ import EmberTesting
         ])
     }
 
-    @Test func theUnsentMessagesStoreForgetsOnlyThatAccountsMessages() {
+    @Test func theUnsentMessagesStoreForgetsOnlyThatAccountsMessages() async throws {
         let unsent = MemoryUnsentMessageStore()
         let message = UnsentMessage(clientMessageId: "c1", body: "Hello", plainText: "Hello", createdAt: .now)
         let mine = UnsentMessageKey(server: origin, userID: "u1", roomID: "r1")
         let theirs = UnsentMessageKey(server: origin, userID: "u2", roomID: "r1")
         let elsewhere = UnsentMessageKey(server: URL(string: "https://ember.testing")!, userID: "u1", roomID: "r1")
-        for key in [mine, theirs, elsewhere] { unsent.save([message], for: key) }
-        let store = LeftOnDevice.standard(unsent: unsent).stores.first { $0.name == "Unsent messages" }
+        for key in [mine, theirs, elsewhere] { try unsent.save([message], for: key) }
+        let store = LeftOnDevice.standard(unsent: unsent, defaults: defaults).stores.first { $0.name == "Unsent messages" }
 
         store?.empty(origin, nil)
         #expect(unsent.saved.count == 3)
         store?.empty(origin, "u1")
-        #expect(Set(unsent.saved.keys) == [theirs, elsewhere])
+        #expect(await eventually { Set(unsent.saved.keys) == [theirs, elsewhere] })
+        #expect(await eventually { defaults.data(forKey: UnsentRemovals.key) == nil })
+    }
+
+    @Test func theAppsUnsentMessagesAreInTheSDKsSharedStore() {
+        #expect(Accounts(defaults: defaults).unsentRemovals.unsent === FileUnsentMessageStore.shared)
+        #expect(EmberClient(origin: origin).unsentStore === FileUnsentMessageStore.shared)
+    }
+
+    @Test func aRemovalOfUnsentMessagesThatFailsIsKeptAndTriedAgain() async throws {
+        let unsent = MemoryUnsentMessageStore()
+        let message = UnsentMessage(clientMessageId: "c1", body: "Hello", plainText: "Hello", createdAt: .now)
+        let mine = UnsentMessageKey(server: origin, userID: "u1", roomID: "r1")
+        try unsent.save([message], for: mine)
+        unsent.failsRemovals = true
+        let removals = UnsentRemovals(unsent: unsent, defaults: defaults)
+
+        removals.remove(server: origin, userID: "u1")
+        await removals.settled()
+        #expect(removals.owed == [.init(server: origin, userID: "u1")])
+        #expect(unsent.saved[mine] != nil)
+        // Noted where the next launch finds it.
+        #expect(UnsentRemovals(unsent: unsent, defaults: defaults).owed == removals.owed)
+
+        removals.retry()
+        await removals.settled()
+        #expect(removals.owed.count == 1)
+
+        unsent.failsRemovals = false
+        removals.retry()
+        await removals.settled()
+        #expect(removals.owed.isEmpty)
+        #expect(unsent.saved.isEmpty)
     }
 
     /// Nonisolated: the transport's stubs call it from whichever thread it answers on.

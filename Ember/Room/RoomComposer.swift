@@ -32,6 +32,9 @@ struct RoomComposer: View {
     @State private var isPickingPhotos = false
     @State private var photos: [PhotosPickerItem] = []
     @State private var isImporting = false
+    /// Previews of links pasted into the draft, to go with it. Held for this room or thread alone:
+    /// they're let go of when the composer becomes another's.
+    @State private var linkPreviews = LinkPreviews()
 
     private var key: DraftKey {
         DraftKey(server: workspace.client.origin.absoluteString, user: workspace.me.id, room: room.roomID, thread: thread?.parentID)
@@ -87,8 +90,13 @@ struct RoomComposer: View {
                     editDraft.text = text
                     return
                 }
+                let before = draft.text
                 drafts.set(Draft(text: text, mentions: draft.mentions), for: key)
                 if thread == nil { room.setTyping(!text.isEmpty) }
+                linkPreviews.textChanged(text)
+                if let link = PastedLink.pasted(from: before, to: text) {
+                    linkPreviews.paste(link, client: workspace.client)
+                }
             })
     }
 
@@ -115,6 +123,8 @@ struct RoomComposer: View {
                     }
                     VStack(spacing: isCompact ? 8 : 12) {
                         if !staged.files.isEmpty || staged.copying > 0 { stagedStrip }
+                        // Set aside with the draft during an edit, which adds no previews.
+                        if editing == nil { pendingPreviews }
                         if isCompact {
                             HStack(alignment: .bottom, spacing: 12) {
                                 attachMenu
@@ -136,6 +146,7 @@ struct RoomComposer: View {
                 }
             }
         }
+        .onChange(of: key) { linkPreviews.clear() }
         .onChange(of: editing?.id) { _, id in
             editDraft = Draft(text: editing?.text ?? "")
             selection = nil
@@ -165,6 +176,20 @@ struct RoomComposer: View {
         .animation(.easeOut(duration: 0.15), value: suggestions?.people.map(\.id))
         .animation(.easeInOut(duration: 0.2), value: editing?.id)
         .animation(.easeInOut(duration: 0.2), value: staged.files.map(\.id))
+        .animation(.easeInOut(duration: 0.2), value: linkPreviews.previews)
+    }
+
+    /// The previews of links pasted, each with its remove button, which go with the text when it's
+    /// sent (but not with files, which go without them).
+    @ViewBuilder private var pendingPreviews: some View {
+        if !linkPreviews.previews.isEmpty {
+            VStack(spacing: 8) {
+                ForEach(linkPreviews.previews, id: \.self) { preview in
+                    PendingLinkPreview(preview: preview) { linkPreviews.remove(preview) }
+                }
+            }
+            .transition(.opacity)
+        }
     }
 
     private var field: some View {
@@ -408,7 +433,8 @@ struct RoomComposer: View {
             return
         }
         do {
-            try Self.send(draft, staged: staged, room: room, thread: thread, alsoSend: alsoSend)
+            try Self.send(draft, staged: staged, previews: linkPreviews.previews, room: room, thread: thread, delivery: alsoSend ? .threadAndRoom : .threadOnly)
+            linkPreviews.clear()
             sent()
         } catch {
             refuse(error)
@@ -448,9 +474,9 @@ struct RoomComposer: View {
 
     /// Sends `draft` with what's staged, which is handed over only once the message is on its way:
     /// a draft refused keeps its files staged. Each file's picture shows on its pending row.
-    static func send(_ draft: Draft, staged: StagedFiles, room: RoomSession, thread: ThreadSession?, alsoSend: Bool) throws(EmberError) {
+    static func send(_ draft: Draft, staged: StagedFiles, previews: [LinkPreview] = [], room: RoomSession, thread: ThreadSession?, delivery: ReplyDelivery) throws(EmberError) {
         let files = staged.files
-        let ids = try send(draft, files: files.map(\.source), room: room, thread: thread, alsoSend: alsoSend)
+        let ids = try send(draft, files: files.map(\.source), previews: previews, room: room, thread: thread, delivery: delivery)
         if !files.isEmpty { _ = staged.takeAll() }
         for (id, thumbnail) in thumbnails(ids: ids, files: files) {
             StagedThumbnails.shared.set(thumbnail, for: id)
@@ -460,26 +486,28 @@ struct RoomComposer: View {
     /// Sends `draft` with `files`, into `thread` when there is one: text in plain through the SDK,
     /// which escapes it, and text with mentions as `outgoing(_:)` builds it. Answers the client
     /// message ids, as `send(files:)` does. Throws, sending nothing, for text the SDK refuses.
+    /// `previews` go after the text; a message with files goes without them, as the SDK sends files
+    /// with none.
     @discardableResult
-    static func send(_ draft: Draft, files: [UploadSource] = [], room: RoomSession, thread: ThreadSession?, alsoSend: Bool) throws(EmberError) -> [String] {
+    static func send(_ draft: Draft, files: [UploadSource] = [], previews: [LinkPreview] = [], room: RoomSession, thread: ThreadSession?, delivery: ReplyDelivery) throws(EmberError) -> [ClientMessageID] {
         switch outgoing(draft) {
         case let .mentions(body, plainText):
             if !files.isEmpty {
-                if let thread { return thread.send(files: files, body: body, plainText: plainText, alsoSend: alsoSend) }
+                if let thread { return thread.send(files: files, body: body, plainText: plainText, delivery: delivery) }
                 return room.send(files: files, body: body, plainText: plainText)
             }
-            if let thread { return [thread.reply(body: body, plainText: plainText, alsoSend: alsoSend)] }
-            return [room.send(body: body, plainText: plainText)]
+            if let thread { return [thread.reply(body: body, plainText: plainText, delivery: delivery, previews: previews)] }
+            return [room.send(body: body, plainText: plainText, previews: previews)]
         case let .text(text):
             if !files.isEmpty {
-                if let thread { return try thread.send(files: files, text: text, alsoSend: alsoSend) }
+                if let thread { return try thread.send(files: files, text: text, delivery: delivery) }
                 return try room.send(files: files, text: text)
             }
-            if let thread { return [try thread.reply(text: text, alsoSend: alsoSend)] }
-            return [try room.send(text: text)]
+            if let thread { return [try thread.reply(text: text, delivery: delivery, previews: previews)] }
+            return [try room.send(text: text, previews: previews)]
         case nil:
             guard !files.isEmpty else { return [] }
-            if let thread { return thread.send(files: files, body: nil, plainText: nil, alsoSend: alsoSend) }
+            if let thread { return thread.send(files: files, body: nil, plainText: nil, delivery: delivery) }
             return room.send(files: files)
         }
     }
@@ -514,7 +542,7 @@ struct RoomComposer: View {
     /// Which thumbnail goes with which id `send(files:)` answered: one id per file in order, a
     /// refused one's too, then the text's; or fewer, or none, once the session's shut down. A
     /// refused file has no pending row to show one in.
-    static func thumbnails(ids: [String], files: [StagedFile]) -> [(id: String, thumbnail: UIImage)] {
+    static func thumbnails(ids: [ClientMessageID], files: [StagedFile]) -> [(id: ClientMessageID, thumbnail: UIImage)] {
         zip(ids, files).compactMap { id, file in
             guard !file.source.isTooLarge, let thumbnail = file.thumbnail else { return nil }
             return (id, thumbnail)

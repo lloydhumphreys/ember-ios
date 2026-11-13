@@ -12,7 +12,7 @@ struct MessageEdit {
     /// `nameOf` is how the timeline names someone, so a mention reads in the field as it shows.
     init(_ message: Message, nameOf: (User) -> String = \.name) {
         self.message = message
-        var names: [String: String] = [:]
+        var names: [UserID: String] = [:]
         for user in message.mentions { names[user.id] = nameOf(user) }
         mentioned = names
         editable = EditableBody(body: message.body, mentionNames: names)
@@ -21,7 +21,7 @@ struct MessageEdit {
     /// Who the message mentions, each by their id and the name the field writes after "@".
     let mentioned: [UserID: String]
 
-    var id: String { message.id }
+    var id: MessageID { message.id }
 
     /// What the field starts with.
     var text: String { editable.text }

@@ -11,12 +11,15 @@ enum TimelineItem: Identifiable {
     var id: String {
         switch self {
         case .day(let date): "day-\(Int(date.timeIntervalSince1970))"
-        case .message(let message, _): message.id
+        case .message(let message, _): TimelineItem.rowID(message.id)
         case .pending(let pending, _): TimelineItem.pendingID(pending.clientMessageId)
         }
     }
 
-    static func pendingID(_ clientMessageId: String) -> String { "pending-\(clientMessageId)" }
+    /// The row of a message the room stored: its id's string.
+    static func rowID(_ id: MessageID) -> String { id.rawValue }
+
+    static func pendingID(_ clientMessageId: ClientMessageID) -> String { "pending-\(clientMessageId.rawValue)" }
 
     /// Whether `id` is a day's heading, which belongs to the day rather than a message: an older
     /// page from the same day takes it to its own top.
@@ -87,7 +90,7 @@ enum TimelineLayout {
             let grouped = !newDay && !quotes(message.parentId, in: place)
                 && me.map { follows(previous, creator: $0, at: message.createdAt, deleted: false) } == true
             items.append(.pending(message, grouped: grouped))
-            previous = Previous(creator: me ?? "", at: message.createdAt, deleted: false)
+            previous = Previous(creator: me ?? UserID(""), at: message.createdAt, deleted: false)
         }
         return items
     }
@@ -98,7 +101,7 @@ enum TimelineLayout {
     }
 
     /// A room quotes what a reply also sent there answers, so it always shows its header.
-    private static func quotes(_ parentID: String?, in place: Place) -> Bool {
+    private static func quotes(_ parentID: MessageID?, in place: Place) -> Bool {
         place == .room && parentID != nil
     }
 
@@ -132,7 +135,7 @@ final class TimelineLayoutCache {
     private var pending: [PendingMessage] = []
     private var me: UserID?
     private var items: [TimelineItem] = []
-    private var segments: [String: Segment] = [:]
+    private var segments: [MessageID: Segment] = [:]
     /// Where each row's id falls in `items`, worked out the first time it's asked for after a
     /// layout.
     private var positions: [String: Int]?
@@ -161,7 +164,7 @@ final class TimelineLayoutCache {
         if messages == self.messages, pending == self.pending, me == self.me { return items }
         var items: [TimelineItem] = []
         items.reserveCapacity(messages.count + messages.count / 8)
-        var segments: [String: Segment] = [:]
+        var segments: [MessageID: Segment] = [:]
         segments.reserveCapacity(messages.count)
         var previous: TimelineLayout.Previous?
         for message in messages {

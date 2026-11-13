@@ -13,11 +13,14 @@ struct RoomsView: View {
     /// again.
     @State private var startingWith: UserID?
     @State private var startError: String?
+    @State private var isReordering = false
 
     var body: some View {
         SidebarGate { list }
         .navigationTitle(workspace.account.name)
         .toolbar { toolbar }
+        .sheet(isPresented: $isReordering) { ReorderRoomsView() }
+        .workspaceNotice(isActive: !isReordering)
         .alert(
             "Couldn’t Start the Conversation",
             isPresented: Binding(get: { startError != nil }, set: { if !$0 { startError = nil } })
@@ -74,6 +77,15 @@ struct RoomsView: View {
         if ConnectionIndicator.isShown(workspace: workspace, network: network) {
             ToolbarItem(placement: .topBarLeading) {
                 ConnectionIndicator()
+            }
+        }
+        if RoomReorder.isOffered(
+            me: workspace.me,
+            favoriteCount: workspace.favoriteRooms.count,
+            sharedCount: workspace.roomsInSharedOrder.count
+        ) {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Reorder", systemImage: "arrow.up.arrow.down") { isReordering = true }
             }
         }
         ToolbarItem(placement: .topBarTrailing) {

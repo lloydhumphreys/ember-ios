@@ -10,7 +10,7 @@ import EmberTesting
 @Suite struct ThreadsAndUploadsTests {
     private let room = Fixtures.general.id
 
-    private func reply(_ id: String, to parent: String, minute: Int = 0, by creator: User = Fixtures.grace, alsoSent: Bool = false) -> Message {
+    private func reply(_ id: MessageID, to parent: MessageID, minute: Int = 0, by creator: User = Fixtures.grace, alsoSent: Bool = false) -> Message {
         var message = Fixtures.message(id, "reply \(id)", by: creator, minute: minute)
         message.parentId = parent
         message.alsoSent = alsoSent
@@ -21,8 +21,8 @@ import EmberTesting
         var grouped: [String: Bool] = [:]
         for item in items {
             switch item {
-            case .message(let message, let isGrouped): grouped[message.id] = isGrouped
-            case .pending(let pending, let isGrouped): grouped[pending.clientMessageId] = isGrouped
+            case .message(let message, let isGrouped): grouped[message.id.rawValue] = isGrouped
+            case .pending(let pending, let isGrouped): grouped[pending.clientMessageId.rawValue] = isGrouped
             case .day: break
             }
         }
@@ -123,7 +123,7 @@ import EmberTesting
         let me = Fixtures.grace.id
         let pending = PendingMessage(
             clientMessageId: "c1", body: "<p>x</p>", plainText: "x",
-            createdAt: Fixtures.message("m", "").createdAt.addingTimeInterval(30), parentId: "p1", alsoSend: true)
+            createdAt: Fixtures.message("m", "").createdAt.addingTimeInterval(30), parentId: "p1", delivery: .threadAndRoom)
         let items = TimelineLayout.items(messages: [Fixtures.message("m1", "hi")], pending: [pending], me: me)
         #expect(grouping(items)["c1"] == false)
     }

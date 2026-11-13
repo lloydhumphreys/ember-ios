@@ -6,6 +6,10 @@ import EmberSDK
 ///
 /// A server that hasn't been set up has no one to sign in as, and setting it up happens in the
 /// browser, so that case gets a link there instead of the form.
+///
+/// A sign-in link can be pasted instead, for this server or another, and a forgotten password reset
+/// here, where the server emails codes and doesn't ask for Turnstile's check, which an app can't
+/// make; otherwise on the web.
 struct SignInView: View {
     let client: EmberClient
     let bootstrap: Bootstrap
@@ -16,6 +20,11 @@ struct SignInView: View {
     @State private var name = ""
     @State private var submission: Submission
     @FocusState private var field: Field?
+    /// The sign-in link being pasted, only until it's used or put away: its id lets anyone in.
+    @State private var link = ""
+    @State private var isAskingForLink = false
+    @State private var isResettingPassword = false
+    @AppStorage(AppAppearance.storageKey) private var appearance: AppAppearance = .system
 
     private enum Field { case email, password, name }
 
@@ -79,6 +88,32 @@ struct SignInView: View {
         .onAppear {
             if !needsSetup { field = isGuest ? .name : .email }
         }
+        .alert("Use a Sign-In Link", isPresented: $isAskingForLink) {
+            TextField("Sign-in link", text: $link)
+                .keyboardType(.URL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            Button("Cancel", role: .cancel) { link = "" }
+            Button("Sign In", action: useLink)
+        }
+        .sheet(isPresented: $isResettingPassword) {
+            NavigationStack {
+                PasswordResetView(email: email.trimmingCharacters(in: .whitespacesAndNewlines)) { address in
+                    // The password changed, but this person signs in another way: back to sign in.
+                    email = address
+                    password = ""
+                    isResettingPassword = false
+                    field = .password
+                }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { isResettingPassword = false }
+                    }
+                }
+            }
+            .environment(session)
+            .preferredColorScheme(appearance.colorScheme)
+        }
     }
 
     // MARK: Form
@@ -130,11 +165,29 @@ struct SignInView: View {
             .disabled(!canSubmit)
             .padding(.top, 14)
 
-            if !isGuest, let url = Self.passwordResetURL(client: client, bootstrap: bootstrap, email: email) {
-                Link("Forgot Password?", destination: url)
-                    .font(.footnote)
-                    .disabled(submission.isWorking)
-                    .padding(.top, 12)
+            if !isGuest {
+                switch Self.passwordReset(client: client, bootstrap: bootstrap, email: email) {
+                case .inApp:
+                    Button("Forgot Password?") { isResettingPassword = true }
+                        .font(.footnote)
+                        .disabled(submission.isWorking)
+                        .padding(.top, 12)
+                case .web(let url):
+                    Link("Forgot Password?", destination: url)
+                        .font(.footnote)
+                        .disabled(submission.isWorking)
+                        .padding(.top, 12)
+                case nil:
+                    EmptyView()
+                }
+
+                Button("Use a Sign-In Link") {
+                    link = ""
+                    isAskingForLink = true
+                }
+                .font(.footnote)
+                .disabled(submission.isWorking)
+                .padding(.top, 12)
             }
         }
         .textFieldStyle(.plain)
@@ -196,6 +249,22 @@ struct SignInView: View {
         .announcesWhenShown(submission.failure)
     }
 
+    /// Where "Forgot Password?" goes.
+    enum PasswordReset: Equatable {
+        /// `PasswordResetView`, in the app.
+        case inApp
+        /// The web's page, as `passwordResetURL` makes it.
+        case web(URL)
+    }
+
+    /// Resetting in the app on a server that emails codes without asking for Turnstile's check; the
+    /// web page on one that asks for it, which only a browser can make; nil on one that can't send
+    /// email at all, which has nothing to offer.
+    static func passwordReset(client: EmberClient, bootstrap: Bootstrap, email: String) -> PasswordReset? {
+        guard let url = passwordResetURL(client: client, bootstrap: bootstrap, email: email) else { return nil }
+        return bootstrap.turnstileSiteKey == nil ? .inApp : .web(url)
+    }
+
     /// The web page that emails a code to reset a forgotten password, with the address typed so far,
     /// on a server that can send email; nil on one that can't, which has no such page.
     static func passwordResetURL(client: EmberClient, bootstrap: Bootstrap, email: String) -> URL? {
@@ -213,6 +282,23 @@ struct SignInView: View {
 
     private func clearError() {
         submission.clearFailure()
+    }
+
+    /// Signs in with the pasted link, on whichever server it's for. The field is emptied first,
+    /// whether or not the link works.
+    private func useLink() {
+        let typed = link
+        link = ""
+        guard !submission.isWorking, !typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        submission.begin()
+        Task {
+            do {
+                try await session.signIn(linkText: typed)
+                submission.finish()
+            } catch {
+                submission.fail((error as? EmberError)?.message ?? error.localizedDescription)
+            }
+        }
     }
 
     private func submit() {

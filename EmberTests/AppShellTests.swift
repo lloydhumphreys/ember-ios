@@ -244,6 +244,25 @@ import EmberTesting
         #expect(places.place(for: ada) == nil)
     }
 
+    @Test func aPlaceIsKeptUnderItsAccountsKeyAsTheTabRoomAndThread() throws {
+        let suite = "EmberTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let places = HomePlaces(defaults: defaults)
+        let ada = HomePlaces.account(origin: URL(string: "https://ember.test")!, userID: "user_ada")
+        #expect(ada == "https://ember.test#user_ada")
+
+        places.remember(HomePlace(tab: .home, link: RoomLink(roomID: "room-general", threadID: "m0")), for: ada)
+        let data = try #require(defaults.data(forKey: "homePlace.https://ember.test#user_ada"))
+        #expect(try JSONSerialization.jsonObject(with: data) as? NSDictionary == ["tab": "home", "roomID": "room-general", "threadID": "m0"] as NSDictionary)
+
+        defaults.set(Data(#"{"tab":"search","roomID":"room-dev","threadID":"m9"}"#.utf8), forKey: "homePlace.https://ember.test#user_ada")
+        #expect(places.place(for: ada) == HomePlace(tab: .search, link: RoomLink(roomID: "room-dev", threadID: "m9")))
+
+        places.forget(origin: URL(string: "https://ember.test")!)
+        #expect(defaults.data(forKey: "homePlace.https://ember.test#user_ada") == nil)
+    }
+
     @Test func aRememberedThreadReopensOverItsRoomWithoutTheMessage() {
         let thread = HomePlace(tab: .home, link: RoomLink(roomID: "room-general", messageID: "m1", threadID: "m0"))
         #expect(thread.path == [RoomLink(roomID: "room-general"), RoomLink(roomID: "room-general", threadID: "m0")])

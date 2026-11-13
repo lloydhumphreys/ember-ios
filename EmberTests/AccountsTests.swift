@@ -115,7 +115,7 @@ import EmberTesting
         try await signIn(first, on: one, as: Person.ada)
         let draft = DraftKey(server: one.origin.absoluteString, user: Person.ada.me.id, room: "room-general")
         first.stores.drafts.set(Draft(text: "Half a thought"), for: draft)
-        let unsent = device.saveUnsent(on: one, for: Person.ada)
+        let unsent = try device.saveUnsent(on: one, for: Person.ada)
         let kept = try #require(device.token(of: first.id))
 
         accounts.beginAdding()
@@ -130,12 +130,55 @@ import EmberTesting
         #expect(!one.ended.contains(kept))
         #expect(one.person(with: kept) == Person.ada.me.id)
         #expect(device.token(of: first.id) == kept)
-        #expect(await eventually { device.keys(of: added.id).isEmpty })
-        #expect(device.vault(added.id).read() == nil)
+        #expect(await eventually { device.keys(of: added.id).isEmpty && device.vault(added.id).read() == nil })
         #expect(first.workspace?.me.id == Person.ada.me.id)
         #expect(first.stores.drafts.draft(for: draft).text == "Half a thought")
-        #expect(!device.unsent.messages(for: unsent).isEmpty)
+        #expect(try !device.unsent.messages(for: unsent).isEmpty)
         #expect(device.defaults.stringArray(forKey: Accounts.listKey) == [first.id])
+    }
+
+    @Test func addingAnAccountWithASignInLinkSignsInOnItsServer() async throws {
+        let one = Server.one(), two = Server.two()
+        let device = Device(one, two)
+        let accounts = device.launch()
+        let first = try #require(accounts.current)
+        try await signIn(first, on: one, as: Person.ada)
+
+        accounts.beginAdding()
+        let added = try #require(accounts.adding)
+        await added.session.start()
+        try await added.session.useServer(two.link(for: Person.grace))
+
+        #expect(accounts.adding == nil)
+        #expect(accounts.slots.map(\.id) == [first.id, added.id])
+        #expect(accounts.current === added)
+        #expect(added.workspace?.client.origin.host == "two.example")
+        #expect(added.workspace?.me.id == Person.grace.me.id)
+        #expect(first.workspace?.me.id == Person.ada.me.id)
+    }
+
+    @Test func aSignInLinkForAnAccountAlreadyHereGoesToIt() async throws {
+        let one = Server.one()
+        let device = Device(one)
+        let accounts = device.launch()
+        let first = try #require(accounts.current)
+        try await signIn(first, on: one, as: Person.ada)
+        let kept = try #require(device.token(of: first.id))
+
+        accounts.beginAdding()
+        let added = try #require(accounts.adding)
+        await added.session.start()
+        try await added.session.useServer(one.link(for: Person.ada))
+
+        #expect(accounts.adding == nil)
+        #expect(accounts.slots.map(\.id) == [first.id])
+        #expect(accounts.current === first)
+        // Only the link's session ends on the server, as when signing in again with a password.
+        #expect(await eventually { one.ended.count == 1 })
+        #expect(!one.ended.contains(kept))
+        #expect(device.token(of: first.id) == kept)
+        // Its keys go before its session ends on the server, and its cookies after.
+        #expect(await eventually { device.keys(of: added.id).isEmpty && device.vault(added.id).read() == nil })
     }
 
     @Test func signingInOnAnAccountWhoseSessionEndedAsAnotherAccountGoesToThatOne() async throws {
@@ -167,7 +210,7 @@ import EmberTesting
         launched.beginAdding()
         let second = try #require(launched.adding)
         try await signIn(second, on: one, as: Person.grace)
-        let unsent = device.saveUnsent(on: one, for: Person.ada)
+        let unsent = try device.saveUnsent(on: one, for: Person.ada)
         // The server ends Ada's session while her account is off screen.
         let old = try #require(device.token(of: first.id))
         one.end(old)
@@ -195,7 +238,7 @@ import EmberTesting
         #expect(one.person(with: fresh) == Person.ada.me.id)
         #expect(!one.ended.contains(fresh))
         #expect(ada.stores.drafts.draft(for: draft).text == "Half a thought")
-        #expect(!device.unsent.messages(for: unsent).isEmpty)
+        #expect(try !device.unsent.messages(for: unsent).isEmpty)
         #expect(await eventually { device.keys(of: added.id).isEmpty })
         #expect(device.vault(added.id).read() == nil)
         #expect(device.defaults.stringArray(forKey: Accounts.listKey) == [ada.id, grace.id])
@@ -244,8 +287,8 @@ import EmberTesting
         let graceDraft = DraftKey(server: one.origin.absoluteString, user: Person.grace.me.id, room: "room-general")
         ada.stores.drafts.set(Draft(text: "Ada’s"), for: adaDraft)
         grace.stores.drafts.set(Draft(text: "Grace’s"), for: graceDraft)
-        let adaUnsent = device.saveUnsent(on: one, for: Person.ada)
-        let graceUnsent = device.saveUnsent(on: one, for: Person.grace)
+        let adaUnsent = try device.saveUnsent(on: one, for: Person.ada)
+        let graceUnsent = try device.saveUnsent(on: one, for: Person.grace)
         let adaToken = try #require(device.token(of: ada.id))
         let graceToken = try #require(device.token(of: grace.id))
         #expect(accounts.current === grace)
@@ -261,13 +304,87 @@ import EmberTesting
         #expect(device.token(of: ada.id) == adaToken)
         #expect(one.person(with: adaToken) == Person.ada.me.id)
         #expect(ada.stores.drafts.draft(for: adaDraft).text == "Ada’s")
-        #expect(!device.unsent.messages(for: adaUnsent).isEmpty)
+        #expect(try !device.unsent.messages(for: adaUnsent).isEmpty)
         // Grace's is gone, here and on the server.
         #expect(one.ended == [graceToken])
         #expect(device.vault(grace.id).read() == nil)
         #expect(device.keys(of: grace.id).isEmpty)
         #expect(grace.stores.drafts.drafts.isEmpty)
-        #expect(device.unsent.messages(for: graceUnsent).isEmpty)
+        await accounts.unsentRemovals.settled()
+        #expect(try device.unsent.messages(for: graceUnsent).isEmpty)
+        #expect(device.defaults.data(forKey: UnsentRemovals.key) == nil)
+    }
+
+    @Test func unsentMessagesThatCouldntBeRemovedAreRemovedAtTheNextLaunch() async throws {
+        let one = Server.one()
+        let device = Device(one)
+        let accounts = device.launch()
+        let ada = try #require(accounts.current)
+        try await signIn(ada, on: one, as: Person.ada)
+        let adaUnsent = try device.saveUnsent(on: one, for: Person.ada)
+        device.unsent.failsRemovals = true
+
+        await accounts.signOut()
+        await accounts.unsentRemovals.settled()
+        #expect(try !device.unsent.messages(for: adaUnsent).isEmpty)
+        #expect(accounts.unsentRemovals.owed.map(\.userID) == [Person.ada.me.id])
+
+        device.unsent.failsRemovals = false
+        let relaunched = device.launch()
+        await relaunched.unsentRemovals.settled()
+        #expect(try device.unsent.messages(for: adaUnsent).isEmpty)
+        #expect(relaunched.unsentRemovals.owed.isEmpty)
+        #expect(device.defaults.data(forKey: UnsentRemovals.key) == nil)
+    }
+
+    @Test func aRemovalOwedWhenTheAccountSignsInAgainIsntTriedOnWhatItLeavesSince() async throws {
+        let one = Server.one()
+        let device = Device(one)
+        let accounts = device.launch()
+        let ada = try #require(accounts.current)
+        try await signIn(ada, on: one, as: Person.ada)
+        _ = try device.saveUnsent(on: one, for: Person.ada)
+        device.unsent.failsRemovals = true
+        await accounts.signOut()
+        await accounts.unsentRemovals.settled()
+        #expect(accounts.unsentRemovals.owed.map(\.userID) == [Person.ada.me.id])
+
+        try await ada.session.signIn(emailAddress: Person.ada.email, password: Person.password)
+        #expect(ada.workspace?.me.id == Person.ada.me.id)
+        await accounts.unsentRemovals.settled()
+        #expect(accounts.unsentRemovals.owed.isEmpty)
+        let unsent = try device.saveUnsent(on: one, for: Person.ada)
+        let written = try device.unsent.messages(for: unsent)
+
+        device.unsent.failsRemovals = false
+        accounts.unsentRemovals.retry()
+        await accounts.unsentRemovals.settled()
+        #expect(try device.unsent.messages(for: unsent) == written)
+        #expect(accounts.unsentRemovals.owed.isEmpty)
+        #expect(device.defaults.data(forKey: UnsentRemovals.key) == nil)
+
+        // Nor at the next launch, found signed in.
+        let relaunched = device.launch()
+        await relaunched.unsentRemovals.settled()
+        #expect(try device.unsent.messages(for: unsent) == written)
+    }
+
+    @Test func aRemovalOwedIsFinishedWhenTheAccountSignsInAgain() async throws {
+        let one = Server.one()
+        let device = Device(one)
+        let accounts = device.launch()
+        let ada = try #require(accounts.current)
+        try await signIn(ada, on: one, as: Person.ada)
+        let before = try device.saveUnsent(on: one, for: Person.ada)
+        device.unsent.failsRemovals = true
+        await accounts.signOut()
+        await accounts.unsentRemovals.settled()
+
+        device.unsent.failsRemovals = false
+        try await ada.session.signIn(emailAddress: Person.ada.email, password: Person.password)
+        await accounts.unsentRemovals.settled()
+        #expect(try device.unsent.messages(for: before).isEmpty)
+        #expect(accounts.unsentRemovals.owed.isEmpty)
     }
 
     @Test func signingOutOfTheOnlyAccountShowsSignInForItsServer() async throws {
@@ -369,7 +486,7 @@ import EmberTesting
         // session cookie in the shared cookie store, a draft and a downloaded file in the shared folders.
         let token = one.startSession(for: Person.ada)
         device.defaults.set(one.origin.absoluteString, forKey: SessionController.originKey)
-        device.defaults.set(["origin": one.origin.absoluteString, "userID": Person.ada.me.id], forKey: SessionController.accountKey)
+        device.defaults.set(["origin": one.origin.absoluteString, "userID": Person.ada.me.id.rawValue], forKey: SessionController.accountKey)
         device.legacyCookies.setCookies(Server.cookies(token, for: one.origin), for: one.origin, mainDocumentURL: nil)
         let elsewhere = URL(string: "https://elsewhere.example")!
         device.legacyCookies.setCookies(Server.cookies("not-ours", for: elsewhere), for: elsewhere, mainDocumentURL: nil)
@@ -401,6 +518,21 @@ import EmberTesting
         // Once moved, it isn't moved again.
         let relaunched = device.launch()
         #expect(relaunched.slots.map(\.id) == [slot.id])
+    }
+
+    @Test func aProfileIsKeptAsJSONWithItsPersonsIDAsAString() throws {
+        let profile = Accounts.Profile(
+            origin: URL(string: "https://ember.test")!, userID: "user_ada", name: "Ada Lovelace",
+            workspaceName: "Ember", avatarPath: "/users/user_ada/avatar")
+        let written = try JSONSerialization.jsonObject(with: JSONEncoder().encode(profile)) as? NSDictionary
+        #expect(written == [
+            "origin": "https://ember.test", "userID": "user_ada", "name": "Ada Lovelace",
+            "workspaceName": "Ember", "avatarPath": "/users/user_ada/avatar",
+        ] as NSDictionary)
+        let stored = #"{"origin":"https://ember.test","userID":"user_grace","name":"Grace Hopper","workspaceName":"Ember"}"#
+        #expect(try JSONDecoder().decode(Accounts.Profile.self, from: Data(stored.utf8)) == Accounts.Profile(
+            origin: URL(string: "https://ember.test")!, userID: "user_grace", name: "Grace Hopper",
+            workspaceName: "Ember", avatarPath: nil))
     }
 
     @Test func whatsLeftOfAnAccountNoLongerListedIsErasedAtLaunch() throws {
@@ -474,6 +606,7 @@ private final class Server: @unchecked Sendable {
     private let lock = NSLock()
     private var sessions: [String: Person] = [:]
     private var endedTokens: [String] = []
+    private var links: [String: Person] = [:]
 
     static func one() -> Server { Server("one.example", workspace: "Fernwood", people: [.ada, .grace, .alan]) }
     static func two() -> Server { Server("two.example", workspace: "Juniper", people: [.ada, .grace]) }
@@ -494,6 +627,15 @@ private final class Server: @unchecked Sendable {
             let token = self.startSession(for: person)
             return .init(json: Fixtures.meJSON(person.me), headers: ["Set-Cookie": Self.setCookie(token)])
         })
+        transport.stub("POST", "/api/session/transfers", answer: { [unowned self] request in
+            guard let body = request.httpBody,
+                  let fields = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  let id = fields["transferId"] as? String,
+                  let person = self.lock.withLock({ self.links.removeValue(forKey: id) })
+            else { return .init(status: 400, json: "") }
+            let token = self.startSession(for: person)
+            return .init(status: 201, json: Fixtures.meJSON(person.me), headers: ["Set-Cookie": Self.setCookie(token)])
+        })
         transport.stub("DELETE", "/api/session") { [unowned self] request in
             if let token = Self.token(in: request) { self.end(token) }
             return (204, "{}")
@@ -506,6 +648,13 @@ private final class Server: @unchecked Sendable {
         let token = UUID().uuidString
         lock.withLock { sessions[token] = person }
         return token
+    }
+
+    /// A sign-in link for `person`, good once, as the web shows one.
+    func link(for person: Person) -> String {
+        let id = "tr_\(UUID().uuidString)"
+        lock.withLock { links[id] = person }
+        return "\(origin.absoluteString)/session/transfers#token=\(id)"
     }
 
     /// Whose session `token` is, while it lasts.
@@ -629,9 +778,9 @@ private final class Server: @unchecked Sendable {
     }
 
     /// Leaves a message unsent for `person` on `server`, answering where it's kept.
-    func saveUnsent(on server: Server, for person: Person) -> UnsentMessageKey {
+    func saveUnsent(on server: Server, for person: Person) throws -> UnsentMessageKey {
         let key = UnsentMessageKey(server: server.origin, userID: person.me.id, roomID: "room-general")
-        unsent.save([UnsentMessage(clientMessageId: UUID().uuidString, body: "Hello", plainText: "Hello", createdAt: .now)], for: key)
+        try unsent.save([UnsentMessage(clientMessageId: ClientMessageID(UUID().uuidString), body: "Hello", plainText: "Hello", createdAt: .now)], for: key)
         return key
     }
 }

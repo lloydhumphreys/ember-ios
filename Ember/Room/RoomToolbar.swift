@@ -6,10 +6,10 @@ import EmberSDK
 struct RoomToolbar: ToolbarContent {
     let roomID: RoomID
     let room: Room?
-    let status: ReconnectingSocket.Status
+    let status: ConnectionStatus
     let isLoaded: Bool
-    /// Who has the room open, for its details.
-    let present: [User]
+    /// Opens the room's details from its title; nil once the room has gone, when there are none.
+    let openInfo: (() -> Void)?
 
     @Environment(Workspace.self) private var workspace
     @Environment(NetworkStatus.self) private var network
@@ -54,39 +54,46 @@ struct RoomToolbar: ToolbarContent {
 
     @ViewBuilder private var title: some View {
         if let room {
-            RoomInfoButton(roomID: roomID, present: present) {
-                HStack(spacing: 6) {
-                    if let connection {
-                        RoomConnectionView(connection: connection, controlSize: .mini)
-                            .frame(width: shownFaceSize, height: shownFaceSize)
-                    } else if room.isDirect {
-                        GroupAvatarView(people: RoomList.membersShown(room, me: workspace.me.id), size: shownFaceSize)
-                    } else {
-                        // Smaller than the name it marks, as the "#" a name is written with is.
-                        Image(systemName: roomSymbol(for: room))
-                            .font(.footnote.weight(.semibold))
-                            // The bar draws its symbols large; this one stays the size of its font.
-                            .imageScale(.medium)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text(workspace.name(of: room))
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                }
-                // On glass of its own, as the bar's buttons are, so messages scrolling under the bar
-                // don't show through the name, and with room round the faces so the capsule's ends
-                // don't cut them.
-                .padding(.leading, room.isDirect || connection != nil ? RoomTitleLayout.facePadding : 12)
-                .padding(.trailing, 12)
-                .padding(.vertical, RoomTitleLayout.facePadding)
-                .titleBackground(in: .capsule)
-                .contentShape(.capsule)
-                .accessibilityElement(children: .combine)
+            if let openInfo {
+                Button(action: openInfo) { roomTitle(room) }
+                    .buttonStyle(.plain)
+            } else {
+                roomTitle(room)
             }
         } else if let connection {
             RoomConnectionView(connection: connection, controlSize: .mini)
         }
+    }
+
+    private func roomTitle(_ room: Room) -> some View {
+        HStack(spacing: 6) {
+            if let connection {
+                RoomConnectionView(connection: connection, controlSize: .mini)
+                    .frame(width: shownFaceSize, height: shownFaceSize)
+            } else if room.isDirect {
+                GroupAvatarView(people: RoomList.membersShown(room, me: workspace.me.id), size: shownFaceSize)
+            } else {
+                // Smaller than the name it marks, as the "#" a name is written with is.
+                Image(systemName: roomSymbol(for: room))
+                    .font(.footnote.weight(.semibold))
+                    // The bar draws its symbols large; this one stays the size of its font.
+                    .imageScale(.medium)
+                    .foregroundStyle(.secondary)
+            }
+            Text(workspace.name(of: room))
+                .font(.headline)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+        }
+        // On glass of its own, as the bar's buttons are, so messages scrolling under the bar
+        // don't show through the name, and with room round the faces so the capsule's ends
+        // don't cut them.
+        .padding(.leading, room.isDirect || connection != nil ? RoomTitleLayout.facePadding : 12)
+        .padding(.trailing, 12)
+        .padding(.vertical, RoomTitleLayout.facePadding)
+        .titleBackground(in: .capsule)
+        .contentShape(.capsule)
+        .accessibilityElement(children: .combine)
     }
 
     private var menu: some View {
@@ -128,7 +135,7 @@ enum RoomConnection: Equatable {
     case offline
     case reconnecting
 
-    init?(isOnline: Bool, isLoaded: Bool, status: ReconnectingSocket.Status) {
+    init?(isOnline: Bool, isLoaded: Bool, status: ConnectionStatus) {
         if !isOnline {
             self = .offline
         } else if isLoaded && status == .connecting {

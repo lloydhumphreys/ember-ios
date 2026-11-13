@@ -37,6 +37,7 @@ private struct RoomScreen: View {
 
     @Environment(Workspace.self) private var workspace
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.returnHome) private var returnHome
 
     @State private var editing: MessageEdit?
     /// The message a custom boost is being typed for.
@@ -54,8 +55,17 @@ private struct RoomScreen: View {
     /// Whether this is the screen on top, so its alert doesn't try to show from under a thread
     /// showing the same notice.
     @State private var isShown = false
+    /// The room as the sidebar last listed it while this screen showed, kept once it's gone.
+    @State private var listed: Room?
+    @State private var isShowingInfo = false
+    /// Set when you deleted the room, or saved it without you, from its details here.
+    @State private var hasLeft = false
 
     private var room: Room? { workspace.room(link.roomID)?.room }
+
+    private var gone: RoomGone? {
+        RoomGone(wasListed: listed != nil, isListed: room != nil, status: session.status, hasLeft: hasLeft)
+    }
 
     var body: some View {
         content
@@ -67,7 +77,27 @@ private struct RoomScreen: View {
             .navigationBarBackButtonHidden()
             .keepsSwipeBack()
             .toolbar {
-                RoomToolbar(roomID: link.roomID, room: room, status: session.status, isLoaded: session.timeline.isLoaded, present: session.timeline.present)
+                RoomToolbar(
+                    roomID: link.roomID,
+                    room: room ?? listed,
+                    status: session.status,
+                    isLoaded: session.timeline.isLoaded,
+                    openInfo: room != nil && gone == nil ? { isShowingInfo = true } : nil
+                )
+            }
+            // On the screen rather than the title, which goes with the room, so deleting the room
+            // from here still comes back to take the tab home.
+            .sheet(isPresented: $isShowingInfo, onDismiss: {
+                if hasLeft { returnHome() }
+            }) {
+                // Left is known before Edit Room is down, so the room behind never says it was deleted.
+                RoomInfoView(roomID: link.roomID, present: session.timeline.present, onLeaving: { hasLeft = true }) {
+                    hasLeft = true
+                    isShowingInfo = false
+                }
+            }
+            .onChange(of: room, initial: true) { _, room in
+                if let room { listed = room }
             }
             .onAppear {
                 isShown = true
@@ -101,7 +131,10 @@ private struct RoomScreen: View {
     }
 
     @ViewBuilder private var content: some View {
-        if let unavailable = RoomUnavailable(session.status) {
+        if gone == .deleted, !session.timeline.isLoaded {
+            // Gone with nothing of it to show.
+            ContentUnavailableView(RoomGone.deletedText, systemImage: "number")
+        } else if gone == nil || gone == .notFound, let unavailable = RoomUnavailable(session.status) {
             RoomUnavailableView(reason: unavailable, place: .room) {
                 lease = RoomUnavailable.retry(session, keeping: lease)
             }
@@ -121,11 +154,65 @@ private struct RoomScreen: View {
                 )
             )
             .bottomBar(spacing: 0) {
-                RoomComposer(room: session, editing: $editing) {
-                    sentCount += 1
+                if let gone, gone.saysDeleted {
+                    RoomDeletedNotice()
+                } else {
+                    RoomComposer(room: session, editing: $editing) {
+                        sentCount += 1
+                    }
                 }
             }
         }
+    }
+}
+
+/// What's become of a room shown that isn't there any more, as the web has it. One you deleted or
+/// left here goes home. One that was there and went otherwise, deleted by someone else or with you
+/// taken out of it, stays to say it was deleted. One never listed and not found was never yours to
+/// see.
+enum RoomGone: Equatable {
+    /// Never listed, and its socket says it isn't there: "Room not found".
+    case notFound
+    /// It was there, and went without you doing it here: its messages stay, and it says so.
+    case deleted
+    /// You deleted it, or saved it without you, from its details: the tab goes home.
+    case left
+
+    static let deletedText = "This room was deleted."
+
+    /// Whether the screen says the room was deleted. Not one you left here: it's on its way home,
+    /// and looks as it did until it goes.
+    var saysDeleted: Bool { self != .left }
+
+    /// - Parameters:
+    ///   - wasListed: whether the sidebar listed the room while the screen showed.
+    ///   - isListed: whether it lists it now.
+    ///   - status: the room's socket.
+    ///   - hasLeft: whether you deleted or left the room from this screen.
+    init?(wasListed: Bool, isListed: Bool, status: ConnectionStatus, hasLeft: Bool) {
+        if hasLeft {
+            self = .left
+        } else if wasListed, !isListed {
+            self = .deleted
+        } else if case .stopped(.notFound) = status {
+            self = wasListed ? .deleted : .notFound
+        } else {
+            return nil
+        }
+    }
+}
+
+/// In place of the composer, once the room has gone from under it.
+private struct RoomDeletedNotice: View {
+    var body: some View {
+        Text(RoomGone.deletedText)
+            .font(.subheadline)
+            .foregroundStyle(.red)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .accessibilityAddTraits(.isStaticText)
     }
 }
 
@@ -137,7 +224,7 @@ enum RoomUnavailable: Equatable {
     /// The server refused the connection.
     case refused
 
-    init?(_ status: ReconnectingSocket.Status) {
+    init?(_ status: ConnectionStatus) {
         switch status {
         case .stopped(.notFound): self = .notFound
         case .stopped(.refused): self = .refused
@@ -196,16 +283,16 @@ struct MessageActions {
     /// Pushes a thread; unused inside one, which has nowhere further to go.
     var openThread: (RoomLink) -> Void = { _ in }
     /// The message with this id as the screen has it now, if it has it.
-    var message: (String) -> Message? = { _ in nil }
+    var message: (MessageID) -> Message? = { _ in nil }
 
     /// Whether the screen shows this message deleted, so a deletion that failed to answer made it.
-    func showsDeleted(_ messageID: String) -> Bool {
+    func showsDeleted(_ messageID: MessageID) -> Bool {
         message(messageID)?.isDeleted == true
     }
 
     /// Whether the screen shows this message without this boost, so a removal that failed to
     /// answer made it.
-    func showsRemoved(boost boostID: String, from messageID: String) -> Bool {
+    func showsRemoved(boost boostID: BoostID, from messageID: MessageID) -> Bool {
         message(messageID).map { message in !message.boosts.contains { $0.id == boostID } } ?? false
     }
 }
@@ -233,7 +320,7 @@ enum Lease {
 }
 
 extension View {
-    /// The custom boost's alert and the Select Text sheet, which rows in a room and in a thread
+    /// The custom boost's alert, the Select Text sheet and the person sheet, which rows in a room and in a thread
     /// both ask for. Boosts go through the room, wherever the message is shown.
     func messageActionPresentations(room: RoomSession, boosting: Binding<Message?>, selecting: Binding<SelectableText?>) -> some View {
         modifier(MessageActionPresentations(room: room, boosting: boosting, selecting: selecting))
@@ -273,6 +360,8 @@ private struct MessageActionPresentations: ViewModifier {
             .sheet(item: $selecting) { text in
                 SelectTextSheet(text: text.text)
             }
+            // Whoever a message's face or name is tapped for.
+            .presentsPeople()
     }
 }
 

@@ -143,7 +143,7 @@ enum Staging {
         let type = contentType(of: copy)
         let preview = await preview(of: copy, contentType: type)
         do {
-            let source = try UploadSource(fileURL: copy, contentType: type, preview: preview, isTemporary: true)
+            let source = try UploadSource.temporary(fileURL: copy, contentType: type, preview: preview)
             return (source, preview?.data)
         } catch {
             discard(copy)

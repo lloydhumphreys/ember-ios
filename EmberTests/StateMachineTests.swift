@@ -135,7 +135,7 @@ import EmberTesting
         model.loadMore()
         #expect(model.more == .idle)
         model.text = "🔥"
-        model.run(record: false)
+        model.run(history: .skip)
         #expect(model.phase == .loaded)
         #expect(model.more == .idle)
     }

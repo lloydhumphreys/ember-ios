@@ -17,16 +17,16 @@ import EmberSDK
             /// Boosting with this content.
             case boost(String)
             /// Taking back the boost with this id.
-            case removeBoost(String)
+            case removeBoost(BoostID)
         }
 
-        let messageID: String
+        let messageID: MessageID
         let kind: Kind
 
-        static func edit(_ messageID: String) -> Key { Key(messageID: messageID, kind: .edit) }
-        static func delete(_ messageID: String) -> Key { Key(messageID: messageID, kind: .delete) }
-        static func boost(_ messageID: String, _ content: String) -> Key { Key(messageID: messageID, kind: .boost(Limits.trimmedBoost(content))) }
-        static func removeBoost(_ messageID: String, _ boostID: String) -> Key { Key(messageID: messageID, kind: .removeBoost(boostID)) }
+        static func edit(_ messageID: MessageID) -> Key { Key(messageID: messageID, kind: .edit) }
+        static func delete(_ messageID: MessageID) -> Key { Key(messageID: messageID, kind: .delete) }
+        static func boost(_ messageID: MessageID, _ content: String) -> Key { Key(messageID: messageID, kind: .boost(Limits.trimmedBoost(content))) }
+        static func removeBoost(_ messageID: MessageID, _ boostID: BoostID) -> Key { Key(messageID: messageID, kind: .removeBoost(boostID)) }
 
         /// Whether `message`, as shown to `me`, has this change made. An edit isn't told apart from
         /// one made by someone else, so never counts.
@@ -142,7 +142,7 @@ import EmberSDK
 
     /// Whether a deletion or boost of the message with this id is on its way. An edit on its way
     /// shows in the composer.
-    func isSendingChange(to messageID: String) -> Bool {
+    func isSendingChange(to messageID: MessageID) -> Bool {
         states.contains { $0.key.messageID == messageID && $0.key.kind != .edit && $0.value == .sending }
     }
 

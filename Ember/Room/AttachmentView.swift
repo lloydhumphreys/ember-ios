@@ -324,12 +324,12 @@ struct PendingUploadView: View {
         images.countLimit = 50
     }
 
-    func image(for clientMessageId: String) -> UIImage? {
-        images.object(forKey: clientMessageId as NSString)
+    func image(for clientMessageId: ClientMessageID) -> UIImage? {
+        images.object(forKey: clientMessageId.rawValue as NSString)
     }
 
-    func set(_ image: UIImage?, for clientMessageId: String) {
-        if let image { images.setObject(image, forKey: clientMessageId as NSString) }
+    func set(_ image: UIImage?, for clientMessageId: ClientMessageID) {
+        if let image { images.setObject(image, forKey: clientMessageId.rawValue as NSString) }
     }
 
     func reset() { images.removeAllObjects() }

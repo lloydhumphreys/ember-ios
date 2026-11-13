@@ -1,7 +1,11 @@
 import SwiftUI
 import EmberSDK
 
-/// The first screen: which Ember server to use.
+/// The first screen: which Ember server to use. A sign-in link pasted in place of its address
+/// signs in there too.
+///
+/// What's typed is only ever in this view's state: it isn't remembered, restored or autocorrected,
+/// so a link's id goes when the field is cleared.
 struct ServerView: View {
     @Environment(SessionController.self) private var session
     @State private var address = ""
@@ -92,13 +96,23 @@ struct ServerView: View {
     private func submit() {
         guard canContinue else { return }
         submission.begin()
+        let typed = address
+        // A sign-in link's id lets anyone in, so it's gone from the field once it's been used,
+        // whether or not it worked.
+        if Self.isSignInLink(typed) { address = "" }
         Task {
             do {
-                try await session.useServer(address)
+                try await session.useServer(typed)
                 submission.finish()
             } catch {
                 submission.fail((error as? EmberError)?.message ?? error.localizedDescription)
             }
         }
+    }
+
+    /// Whether `typed` is a sign-in link, which `SessionController.useServer` signs in with rather
+    /// than only choosing its server.
+    static func isSignInLink(_ typed: String) -> Bool {
+        SignInLink(typed) != nil
     }
 }

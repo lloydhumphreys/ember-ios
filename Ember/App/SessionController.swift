@@ -108,12 +108,12 @@ import EmberSDK
         guard let stored = defaults.dictionary(forKey: keys.account) as? [String: String],
               let origin = stored["origin"].flatMap(URL.init(string:)), let userID = stored["userID"]
         else { return nil }
-        return SignedInAccount(origin: origin, userID: userID)
+        return SignedInAccount(origin: origin, userID: UserID(userID))
     }
 
     private func remember(_ account: SignedInAccount?) {
         if let account {
-            defaults.set(["origin": account.origin.absoluteString, "userID": account.userID], forKey: keys.account)
+            defaults.set(["origin": account.origin.absoluteString, "userID": account.userID.rawValue], forKey: keys.account)
         } else {
             defaults.removeObject(forKey: keys.account)
         }
@@ -150,36 +150,67 @@ import EmberSDK
     /// Throws an `EmberError` for an address that isn't one, plain http to a public host, or a
     /// server that doesn't answer like Ember. On success, remembers the server where it answered
     /// from, after any redirect, and moves to `.signedOut` or `.signedIn`.
+    ///
+    /// A sign-in link typed in place of an address is its server and a sign-in at once, as
+    /// `signIn(link:)` uses it.
     func useServer(_ typed: String) async throws {
+        if let link = SignInLink(typed) {
+            try await signIn(link: link)
+            return
+        }
         guard let origin = ServerAddress.origin(from: typed) else {
             throw EmberError(status: 0, message: "That isn’t a server address.", field: "address")
         }
-        // The system wouldn't send it, so asking would only fail as unreachable.
-        guard !ServerAddress.needsHTTPS(origin) else {
-            throw EmberError(status: 0, message: "Use https:// for \(ServerAddress.display(origin)).", field: "address")
-        }
+        try Self.requireHTTPS(origin)
         let current = nextGeneration()
         stopRetrying()
         lastSignOut = nil
-        var client = makeClient(origin)
-        let bootstrap: Bootstrap
-        do {
-            let check = try await client.checkServer()
-            bootstrap = check.bootstrap
-            if check.origin != client.origin { client = makeClient(check.origin) }
-        } catch {
-            // Nobody's waiting on a stale answer, so there's no error to show either.
-            guard current == generation else { return }
-            if let error = error as? EmberError, error.isUnreachable {
-                throw EmberError(status: 0, message: "Couldn’t reach \(ServerAddress.display(origin)).", field: "address")
-            }
-            // It answered, but not with a bootstrap: a web page, a 404, some other API.
-            let status = (error as? EmberError)?.status ?? 0
-            throw EmberError(status: status, message: "\(ServerAddress.display(origin)) isn’t an Ember server.", field: "address")
-        }
-        guard current == generation else { return }
+        guard let (client, bootstrap) = try await check(origin, generation: current) else { return }
         defaults.set(client.origin.absoluteString, forKey: keys.origin)
         enter(client, bootstrap)
+    }
+
+    /// `typed` as a sign-in link, signed in with as `signIn(link:)` does; an `EmberError` with field
+    /// `"link"` when it isn't one.
+    func signIn(linkText typed: String) async throws {
+        guard let link = SignInLink(typed) else {
+            throw EmberError(status: 0, message: "That isn’t a sign-in link.", field: "link")
+        }
+        try await signIn(link: link)
+    }
+
+    /// Signs in with a sign-in link, on its server: the one on screen, or another, checked as
+    /// `useServer` checks one. Nothing changes until it works, so a link that doesn't leaves the
+    /// screen it was pasted on as it was, with the error to show there. Once it works, the link's
+    /// server is this account's, and one it replaces is let go as Change Server lets it go.
+    ///
+    /// The link's id is sent and nowhere else: it isn't kept here or in `defaults`.
+    func signIn(link: SignInLink) async throws {
+        switch phase {
+        case .needsServer, .signedOut: break
+        case .launching, .signedIn, .unreachable: return
+        }
+        try Self.requireHTTPS(link.origin)
+        let current = nextGeneration()
+        stopRetrying()
+        let replacing = phase.origin
+        let client: EmberClient
+        let bootstrap: Bootstrap
+        if case .signedOut(let shown, let shownBootstrap) = phase, shown.origin == link.origin {
+            (client, bootstrap) = (shown, shownBootstrap)
+        } else {
+            guard let checked = try await check(link.origin, generation: current) else { return }
+            (client, bootstrap) = checked
+        }
+        let me = try await answer(bootstrap) { try await client.signIn(transferID: link.transferID) }
+        guard current == generation else { return }
+        if let replacing, replacing != client.origin {
+            leftOnDevice.empty(for: replacing, userID: nil)
+            makeClient(replacing).forgetCookies()
+        }
+        lastSignOut = nil
+        defaults.set(client.origin.absoluteString, forKey: keys.origin)
+        signedIn(client, me: me, account: bootstrap.account)
     }
 
     /// Back to `.needsServer`, forgetting the remembered one, everything left from it on the device,
@@ -224,6 +255,28 @@ import EmberSDK
         let me = try await answer(bootstrap) { try await client.signIn(name: name) }
         guard current == generation else { return }
         signedIn(client, me: me, account: bootstrap.account)
+    }
+
+    /// Asks the server on screen to email a code for a new password to `emailAddress`. It answers
+    /// the same whether or not anyone has it.
+    func askForPasswordReset(emailAddress: String) async throws {
+        guard case .signedOut(let client, _) = phase else { return }
+        try await Self.readably { try await client.askForPasswordReset(emailAddress: emailAddress) }
+    }
+
+    /// Gives whoever has `emailAddress` `newPassword`, with the code they were emailed. True when
+    /// that signed them in, as signing in with a password does; false when the password changed but
+    /// they sign in another way, and must do that next.
+    @discardableResult
+    func resetPassword(emailAddress: String, code: String, newPassword: String) async throws -> Bool {
+        guard case .signedOut(let client, let bootstrap) = phase else { return false }
+        let current = nextGeneration()
+        let me = try await Self.readably {
+            try await client.resetPassword(emailAddress: emailAddress, code: code, newPassword: newPassword)
+        }
+        guard current == generation, let me else { return false }
+        signedIn(client, me: me, account: bootstrap.account)
+        return true
     }
 
     /// Ends the session on the server and here, then shows sign-in for the same server. Also what
@@ -408,6 +461,46 @@ import EmberSDK
                 message: bootstrap.signInWithMemberful
                     ? "Signing in with Memberful isn’t available in the app."
                     : "Something went wrong. Try again.")
+        }
+    }
+
+    /// `work`'s answer, with anything that isn't an `EmberError` made one there's a message for.
+    private static func readably<Value>(_ work: () async throws -> Value) async throws -> Value {
+        do {
+            return try await work()
+        } catch let error as EmberError {
+            throw error
+        } catch {
+            throw EmberError(status: 0, message: "Something went wrong. Try again.")
+        }
+    }
+
+    /// The system wouldn't send plain http to a public host, so asking would only fail as unreachable.
+    private static func requireHTTPS(_ origin: URL) throws {
+        guard !ServerAddress.needsHTTPS(origin) else {
+            throw EmberError(status: 0, message: "Use https:// for \(ServerAddress.display(origin)).", field: "address")
+        }
+    }
+
+    /// A client for the server at `origin`, where it answered from after any redirect, and its
+    /// bootstrap; nil when `generation` has moved on by the time it answers. Throws an `EmberError`
+    /// for a server that doesn't answer, or doesn't answer like Ember.
+    private func check(_ origin: URL, generation current: Int) async throws -> (EmberClient, Bootstrap)? {
+        var client = makeClient(origin)
+        do {
+            let check = try await client.checkServer()
+            guard current == generation else { return nil }
+            if check.origin != client.origin { client = makeClient(check.origin) }
+            return (client, check.bootstrap)
+        } catch {
+            // Nobody's waiting on a stale answer, so there's no error to show either.
+            guard current == generation else { return nil }
+            if let error = error as? EmberError, error.isUnreachable {
+                throw EmberError(status: 0, message: "Couldn’t reach \(ServerAddress.display(origin)).", field: "address")
+            }
+            // It answered, but not with a bootstrap: a web page, a 404, some other API.
+            let status = (error as? EmberError)?.status ?? 0
+            throw EmberError(status: status, message: "\(ServerAddress.display(origin)) isn’t an Ember server.", field: "address")
         }
     }
 

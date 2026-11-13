@@ -497,6 +497,7 @@ import EmberTesting
         sizes.remember(.zero, for: PictureSizes.key(card: "https://example.com/a.png"))
         #expect(sizes.count == 1)
         #expect(PictureSizes.key(file: "a") != PictureSizes.key(card: "a"))
+        #expect(PictureSizes.key(file: "file_1") == "file:file_1")
     }
 
     @Test func rememberedSizesForgetTheOldestPastTheirLimit() {
@@ -592,6 +593,14 @@ import EmberTesting
         _ = await third.result
     }
 
+    @Test func aDownloadIsKeptInAFolderNamedForItsFile() throws {
+        let (downloads, _, directory) = try Self.downloads(origin: "https://files-folder.example.com")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let location = downloads.location(of: try Self.file(id: "file_42", name: "report.pdf"))
+        #expect(location.lastPathComponent == "report.pdf")
+        #expect(location.deletingLastPathComponent().lastPathComponent == "file_42")
+    }
+
     @Test func aFileThatFailsToDownloadIsNotKept() async throws {
         let (downloads, client, directory) = try Self.downloads(origin: "https://files-gone.example.com")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -603,7 +612,7 @@ import EmberTesting
     @Test func aDownloadCarriesTheSessionOnlyToTheServerItself() throws {
         let cookies = EphemeralCookieStorage()
         cookies.setCookie(HTTPCookie(properties: [.name: "session", .value: "s3cret", .domain: "chat.example.com", .path: "/", .secure: "TRUE"])!)
-        let client = EmberClient(origin: URL(string: "https://chat.example.com")!, transport: ImageTransport(.init(), gate: nil), connector: MockSocketConnector(), cookies: cookies)
+        let client = EmberClient(origin: URL(string: "https://chat.example.com")!, environment: .mock(transport: ImageTransport(.init(), gate: nil), cookies: cookies))
         let own = try FileDownloads.request(for: try Self.file(download: "/files/f?download=1"), client: client)
         #expect(own.value(forHTTPHeaderField: "Cookie")?.contains("s3cret") == true)
         let signed = try FileDownloads.request(for: try Self.file(download: "https://bucket.example.net/f?sig=1"), client: client)
@@ -707,7 +716,7 @@ import EmberTesting
 
     private static func remote(_ answer: ImageTransport.Answer, gate: AsyncGate? = nil) -> (RemoteImages, EmberClient, ImageTransport) {
         let transport = ImageTransport(answer, gate: gate)
-        let client = EmberClient(origin: URL(string: "https://chat.example.com")!, transport: transport, connector: MockSocketConnector(), cookies: EphemeralCookieStorage())
+        let client = EmberClient(origin: URL(string: "https://chat.example.com")!, environment: .mock(transport: transport, cookies: EphemeralCookieStorage()))
         return (RemoteImages(), client, transport)
     }
 
@@ -724,7 +733,7 @@ import EmberTesting
     private static func downloads(origin: String, limit: Int = 300 * 1024 * 1024) throws -> (FileDownloads, EmberClient, URL) {
         let directory = FileManager.default.temporaryDirectory.appending(path: "Files-\(UUID().uuidString)", directoryHint: .isDirectory)
         let downloads = FileDownloads(directory: directory, limit: limit, protocolClasses: [ImageStub.self])
-        let client = EmberClient(origin: URL(string: origin)!, transport: ImageTransport(.init(), gate: nil), connector: MockSocketConnector(), cookies: EphemeralCookieStorage())
+        let client = EmberClient(origin: URL(string: origin)!, environment: .mock(transport: ImageTransport(.init(), gate: nil), cookies: EphemeralCookieStorage()))
         return (downloads, client, directory)
     }
 

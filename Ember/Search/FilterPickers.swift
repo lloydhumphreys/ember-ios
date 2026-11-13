@@ -26,11 +26,12 @@ import SwiftUI
     }
 
     /// Everyone in the directory by name, as Search's Person picker lists them: those still here
-    /// first, then those who've been deactivated or banned.
+    /// first, then those who've been deactivated or suspended, whose messages stay to be found. Not
+    /// anyone banned, whose messages were deleted with them, as the web leaves them out.
     func people(_ directory: [UserID: DirectoryUser]) -> [DirectoryUser] {
         if peopleSource == directory { return sortedPeople }
         peopleSource = directory
-        sortedPeople = Self.byName(directory.values)
+        sortedPeople = Self.byName(directory.values.filter { $0.status != .banned })
         peopleBuilds += 1
         return sortedPeople
     }

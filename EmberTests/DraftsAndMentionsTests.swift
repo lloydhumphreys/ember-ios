@@ -5,17 +5,17 @@ import UniformTypeIdentifiers
 import EmberSDK
 @testable import Ember
 
-private let ann = "0abcdefghijklmno"
-private let anna = "1abcdefghijklmno"
-private let bo = "2abcdefghijklmno"
+private let ann: UserID = "0abcdefghijklmno"
+private let anna: UserID = "1abcdefghijklmno"
+private let bo: UserID = "2abcdefghijklmno"
 
-private func person(_ id: String, _ name: String, role: Role = .member, status: UserStatus = .active) -> DirectoryUser {
+private func person(_ id: UserID, _ name: String, role: Role = .member, status: UserStatus = .active) -> DirectoryUser {
     DirectoryUser(id: id, name: name, role: role, status: status, avatarUrl: "/users/\(id)/avatar")
 }
 
 /// The stored form of a mention, as the server keeps every one a client sends.
-private func stored(_ userId: String) -> String {
-    "<action-text-attachment content-type=\"application/vnd.campfire.mention\" sgid=\"\(userId)\"></action-text-attachment>"
+private func stored(_ userId: UserID) -> String {
+    "<action-text-attachment content-type=\"application/vnd.campfire.mention\" sgid=\"\(userId.rawValue)\"></action-text-attachment>"
 }
 
 /// Drafts kept per room and thread across launches, mentions typed after "@", how far a draft runs
@@ -52,6 +52,28 @@ private func stored(_ userId: String) -> String {
         #expect(drafts.draft(for: DraftKey(server: "https://ember.example", user: "someone", room: "room1")).isEmpty)
     }
 
+    @Test func aDraftsKeyOnDiskIsTheServerPersonRoomAndThread() {
+        var thread = room
+        thread.thread = "parent1"
+        #expect(room.storageKey == "https://ember.example me room1 ")
+        #expect(thread.storageKey == "https://ember.example me room1 parent1")
+    }
+
+    @Test func draftsOnDiskAreAnObjectOfDraftsWithMentionsByID() throws {
+        let drafts = Drafts(file: file)
+        drafts.set(Draft(text: "@Ann half written", mentions: [ann: "Ann"]), for: room)
+        drafts.save()
+        let written = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? NSDictionary
+        #expect(written == [
+            "https://ember.example me room1 ": ["text": "@Ann half written", "mentions": ["0abcdefghijklmno": "Ann"]],
+        ] as NSDictionary)
+
+        try Data(#"{"https://ember.example me room1 parent1":{"text":"@Bo hi","mentions":{"2abcdefghijklmno":"Bo"}}}"#.utf8).write(to: file)
+        var thread = room
+        thread.thread = "parent1"
+        #expect(Drafts(file: file).draft(for: thread) == Draft(text: "@Bo hi", mentions: [bo: "Bo"]))
+    }
+
     @Test func aDraftIsThereAfterARelaunch() {
         let first = Drafts(file: file)
         first.set(Draft(text: "@Ann half written", mentions: [ann: "Ann"]), for: room)
@@ -75,7 +97,7 @@ private func stored(_ userId: String) -> String {
         drafts.save()
         let staged = drafts.staged(for: room)
         let copy = try Staging.copied(try picked("a.jpg"), isScoped: false, into: root.appending(path: "Uploads"))
-        staged.append(StagedFile(source: try UploadSource(fileURL: copy, contentType: "image/jpeg", isTemporary: true), thumbnail: nil))
+        staged.append(StagedFile(source: try UploadSource.temporary(fileURL: copy, contentType: "image/jpeg"), thumbnail: nil))
         drafts.removeAll()
         #expect(drafts.drafts.isEmpty)
         #expect(!FileManager.default.fileExists(atPath: file.path))
@@ -165,7 +187,7 @@ private func stored(_ userId: String) -> String {
     }
 
     @Test func botsComeAfterPeopleEvenFromTheRoom() {
-        let deploy = "0deploy000000000"
+        let deploy: UserID = "0deploy000000000"
         let people = [person(deploy, "Deploy Bot", role: .bot), person(bo, "Bo"), person(ann, "Ann"), person("0ember0000000000", "Ember", role: .bot)]
         #expect(MentionQuery.candidates(people, matching: "").map(\.name) == ["Ann", "Bo", "Deploy Bot", "Ember"])
         #expect(MentionQuery.candidates(people, matching: "", first: [deploy, bo]).map(\.name) == ["Bo", "Ann", "Deploy Bot", "Ember"])

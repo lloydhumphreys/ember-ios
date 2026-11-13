@@ -121,9 +121,9 @@ private struct ThreadTimelineView: View {
     @State private var isNearTop = false
     /// Paging waits for the first layout (and the scroll to a linked reply) to land.
     @State private var hasSettled = false
-    @State private var highlightedID: String?
+    @State private var highlightedID: MessageID?
     /// The reply a link is landing on, and where its row is, as the room's jump has them.
-    @State private var landingID: String?
+    @State private var landingID: MessageID?
     @State private var landingFrame: CGRect?
     @State private var olderGate = PagingGate()
     @State private var tracker = TimelineTracker()
@@ -143,7 +143,7 @@ private struct ThreadTimelineView: View {
                         MessageRow(
                             message: parent, grouped: false, me: timeline.me, isHighlighted: false,
                             session: thread.room, actions: actions, place: .threadParent)
-                        .id(parent.id)
+                        .id(TimelineItem.rowID(parent.id))
                         if let count = TimelineLayout.replyCount(summary: parent.thread?.count, loaded: timeline.replies.count) {
                             RepliesDivider(count: count)
                         }
@@ -208,8 +208,9 @@ private struct ThreadTimelineView: View {
             }
             .onChange(of: MessageFolds.shared.raising) { _, raise in
                 guard let raise, raise.place != .room else { return }
-                guard position(of: raise.messageID) != nil else { return MessageFolds.shared.dropped(raise) }
-                tracker.raise(raise.messageID, proxy) { MessageFolds.shared.raised(raise) }
+                let row = TimelineItem.rowID(raise.messageID)
+                guard position(of: row) != nil else { return MessageFolds.shared.dropped(raise) }
+                tracker.raise(row, proxy) { MessageFolds.shared.raised(raise) }
             }
             .task(id: MessageFolds.shared.lastToggle?.serial) {
                 guard let serial = MessageFolds.shared.lastToggle?.serial, serial != settledFold else { return }
@@ -302,7 +303,7 @@ private struct ThreadTimelineView: View {
 
     /// Where the row `id` falls, the parent first, then the replies' rows.
     private func position(of id: String) -> Int? {
-        id == timeline.parentMessage?.id ? -1 : layout.position(of: id)
+        id == timeline.parentMessage.map({ TimelineItem.rowID($0.id) }) ? -1 : layout.position(of: id)
     }
 
     /// As the room notes it.
@@ -364,7 +365,7 @@ private struct ThreadTimelineView: View {
             landingID = focus
             defer { landingID = nil }
             tracker.cancelMoves()
-            await JumpLander.on(focus, proxy, frame: { landingFrame }, viewport: { tracker.viewportHeight }).show(
+            await JumpLander.on(TimelineItem.rowID(focus), proxy, frame: { landingFrame }, viewport: { tracker.viewportHeight }).show(
                 highlight: { highlightedID = focus },
                 shown: {
                     // Left where the landing put it, rather than taken back to the end as the
@@ -430,7 +431,7 @@ private struct ThreadTimelineView: View {
     }
 
     private struct FocusKey: Equatable {
-        var focus: String?
+        var focus: MessageID?
         var isLoaded: Bool
     }
 }

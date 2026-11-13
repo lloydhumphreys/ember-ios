@@ -6,6 +6,7 @@ import EmberRichText
 /// whole of the new one's screens afresh, so nothing of the last one's is left on screen.
 struct RootView: View {
     @Environment(Accounts.self) private var accounts
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(AppAppearance.storageKey) private var appearance: AppAppearance = .system
 
     var body: some View {
@@ -26,6 +27,9 @@ struct RootView: View {
         .environment(accounts.network)
         .preferredColorScheme(appearance.colorScheme)
         .task { accounts.start() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { accounts.unsentRemovals.retry() }
+        }
     }
 
     /// The account being added; swiping the sheet away cancels it.
@@ -179,7 +183,21 @@ private struct SignedInView: View {
             .onChange(of: scenePhase) { _, phase in
                 switch phase {
                 case .active: workspace.start()
-                case .background: workspace.stop()
+                case .background:
+                    // What rooms hold unsent goes to disk with the time the system gives to finish,
+                    // for a few seconds at most, so the time is always handed back.
+                    let end = workspace.client.backgroundTime.begin("Saving unsent messages")
+                    let flush = Task { try await workspace.flushUnsent() }
+                    let limit = Task {
+                        try await Task.sleep(for: .seconds(5))
+                        flush.cancel()
+                    }
+                    Task {
+                        _ = await flush.result
+                        limit.cancel()
+                        end()
+                    }
+                    workspace.stop()
                 // Inactive is Control Centre or a call coming in: not worth reconnecting over.
                 default: break
                 }

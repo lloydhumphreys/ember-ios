@@ -24,14 +24,14 @@ import EmberTesting
         return try #require(connector.latest)
     }
 
-    func sent(_ socket: MockSocketConnection, _ type: String) -> [ClientFrame] {
+    func sent(_ socket: MockSocketConnection, _ type: String) -> [SentFrame] {
         socket.sentFrames.filter { $0.type == type }
     }
 
     /// The bodies of the messages the client created.
     func created(_ socket: MockSocketConnection) -> [String] {
         socket.sentFrames.compactMap {
-            if case let .createMessage(_, body, _, _) = $0 { body } else { nil }
+            $0.type == "message.create" ? $0.string("body") : nil
         }
     }
 
@@ -50,7 +50,7 @@ import EmberTesting
     }
 
     /// The message with `id` as the room shows it, with no boosts and not deleted.
-    func asShown(_ id: String) -> Message {
+    func asShown(_ id: MessageID) -> Message {
         Fixtures.message(id, "Hi")
     }
 
@@ -149,17 +149,18 @@ import EmberTesting
         let body = try #require(edit.body(for: chosen.draft))
         let saving = Task { await RoomComposer.save(edit, body: body, in: session, changes: SentChanges()) }
         #expect(await eventually { sent(socket, "message.check").count == 1 })
-        guard case let .checkMessages(markers) = sent(socket, "message.check").first else { throw Failure() }
+        guard case let .array(ids)? = sent(socket, "message.check").first?["clientMessageIds"] else { throw Failure() }
+        let markers = ids.compactMap { if case let .string(id) = $0 { ClientMessageID(id) } else { nil } }
         socket.serverSends(Fixtures.RoomFrames.messageChecked(stored: [], missing: markers))
         #expect(await saving.value)
         let updates = sent(socket, "message.update")
-        guard updates.count == 1, case let .updateMessage(id, sentBody) = updates[0] else { throw Failure() }
-        #expect(id == message.id)
+        guard updates.count == 1, let id = updates[0].string("messageId"), let sentBody = updates[0].string("body") else { throw Failure() }
+        #expect(MessageID(id) == message.id)
         return sentBody
     }
 
-    static let bo = "1abcdefghijklmno"
-    static let boMention = "<action-text-attachment content-type=\"application/vnd.campfire.mention\" sgid=\"\(bo)\"></action-text-attachment>"
+    static let bo: UserID = "1abcdefghijklmno"
+    static let boMention = "<action-text-attachment content-type=\"application/vnd.campfire.mention\" sgid=\"\(bo.rawValue)\"></action-text-attachment>"
 
     @Test func anEditInTheRoomSendsTheMentionChosen() async throws {
         let session = session()
@@ -372,7 +373,7 @@ import EmberTesting
 
     @Test func aRoomOnTheAppsClientKeepsWhatsUnsentInAFile() {
         let session = RoomSession(client: EmberClient(origin: URL(string: "https://chat.example.com")!), roomID: Fixtures.general.id)
-        #expect(session.unsentStore is FileUnsentMessageStore)
+        #expect(session.unsentStore === FileUnsentMessageStore.shared)
     }
 
     @Test func aMessageNotSentShowsFailedAndRetryAndDiscardGoToTheRoom() async throws {
@@ -681,7 +682,7 @@ import EmberTesting
         let session = session()
         let socket = try await opened(session)
         let typed = "a < b & c\nnext line"
-        try RoomComposer.send(Draft(text: typed), room: session, thread: nil, alsoSend: false)
+        try RoomComposer.send(Draft(text: typed), room: session, thread: nil, delivery: .threadOnly)
         #expect(await eventually { created(socket).count == 1 })
         let body = try #require(created(socket).first)
         #expect(body == RichText.body(fromPlainText: typed))
@@ -696,7 +697,7 @@ import EmberTesting
         let socket = try await opened(session)
         let thread = session.thread("m001")
         let typed = "a < b & c\r\nnext line\n\n"
-        try RoomComposer.send(Draft(text: typed), room: session, thread: thread, alsoSend: false)
+        try RoomComposer.send(Draft(text: typed), room: session, thread: thread, delivery: .threadOnly)
         #expect(await eventually { created(socket).count == 1 })
         let body = try #require(created(socket).first)
         #expect(shown(body) == "a < b & c\nnext line")
@@ -706,7 +707,7 @@ import EmberTesting
     @Test func aBlankDraftSendsNothing() async throws {
         let session = session()
         _ = try await opened(session)
-        #expect(try RoomComposer.send(Draft(text: "  \n\t \r\n "), room: session, thread: nil, alsoSend: false).isEmpty)
+        #expect(try RoomComposer.send(Draft(text: "  \n\t \r\n "), room: session, thread: nil, delivery: .threadOnly).isEmpty)
         #expect(session.timeline.pending.isEmpty)
         #expect(RoomComposer.outgoing(Draft(text: "")) == nil)
     }

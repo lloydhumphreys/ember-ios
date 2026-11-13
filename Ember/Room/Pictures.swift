@@ -31,7 +31,7 @@ import EmberSDK
         }
     }
 
-    static func key(file id: String) -> String { "file:\(id)" }
+    static func key(file id: FileID) -> String { "file:\(id.rawValue)" }
     static func key(card url: String) -> String { "card:\(url)" }
 
     func size(for key: String) -> CGSize? { sizes[key] }
