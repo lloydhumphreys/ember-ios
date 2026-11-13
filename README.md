@@ -78,11 +78,7 @@ The app runs on iOS 18 and later. It uses iOS 26 features where they exist, so y
 brew install xcodegen
 ```
 
-The app uses the SDK as a local package at `../ember-swift-sdk`, so clone both repositories into the same folder.
-
-```bash
-git clone https://github.com/lloydhumphreys/ember-swift-sdk
-```
+The app uses the [Ember Swift SDK](https://github.com/lloydhumphreys/ember-swift-sdk) at version 0.1.0, which Xcode fetches when it opens the project.
 
 ```bash
 git clone https://github.com/lloydhumphreys/ember-ios
@@ -104,11 +100,17 @@ open Ember.xcodeproj
 
 Choose the `Ember` scheme and an iPhone simulator, then run. A simulator build needs no signing setup. Run `xcodegen generate` again after adding or removing files.
 
+To work on the SDK alongside the app, clone it next to `ember-ios` and change `packages.EmberSDK` in `project.yml` to `path: ../ember-swift-sdk`.
+
 ## Trying it without a server
 
 The SDK includes a stand-in server, so you can try the app without deploying Ember. It is a small Node script (Node 18 or later, no dependencies) that speaks Ember's HTTP and socket protocol, with seeded people, rooms, threads, files and bot cards. State is held in memory and resets on each start.
 
-Every seeded account uses one password, which you choose. The server reads it from `EMBER_SEED_PASSWORD`, or else from `.dev/seed-password` at the root of the SDK checkout. It never prints the password. From the SDK checkout:
+Every seeded account uses one password, which you choose. The server reads it from `EMBER_SEED_PASSWORD`, or else from `.dev/seed-password` at the root of the SDK checkout. It never prints the password. Clone the SDK next to the app, and from that checkout:
+
+```bash
+git clone https://github.com/lloydhumphreys/ember-swift-sdk ../ember-swift-sdk
+```
 
 ```bash
 cd ../ember-swift-sdk
